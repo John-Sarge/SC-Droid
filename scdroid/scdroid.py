@@ -394,29 +394,29 @@ class SCDroid(commands.Cog):
                                 await ctx.send("No incidents reported recently.")
                                 return
                             
+                            # Get the most recent incident only
+                            item = items[0]
+                            title = item.find("title").text
+                            link = item.find("link").text
+                            description = item.find("description").text or "No details."
+                            
+                            # Simple cleanup of HTML tags commonly found in RSS descriptions
+                            clean_desc = description.replace("<p>", "").replace("</p>", "\n").replace("<strong>", "**").replace("</strong>", "**").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&amp;", "&")
+                            # Remove comments
+                            clean_desc = clean_desc.replace("<!-- raw HTML omitted -->", "")
+                            
+
+                            if len(clean_desc) > 2048:
+                                clean_desc = clean_desc[:2045] + "..."
+                            
                             embed = discord.Embed(
-                                title="RSI Platform Status", 
-                                url="https://status.robertsspaceindustries.com/", 
+                                title=title,
+                                url=link,
+                                description=clean_desc,
                                 color=discord.Color.orange(),
                                 timestamp=ctx.message.created_at
                             )
-                            
-                            # Show the 3 most recent incidents
-                            for item in items[:3]:
-                                title = item.find("title").text
-                                link = item.find("link").text
-                                description = item.find("description").text or "No details."
-                                
-                                # Simple cleanup of HTML tags commonly found in RSS descriptions
-                                clean_desc = description.replace("<p>", "").replace("</p>", "\n").replace("<strong>", "**").replace("</strong>", "**").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&amp;", "&")
-                                # Remove comments
-                                clean_desc = clean_desc.replace("<!-- raw HTML omitted -->", "")
-                                
-                                if len(clean_desc) > 300:
-                                    clean_desc = clean_desc[:297] + "..."
-                                
-                                value_field = f"{clean_desc}\n[More Info]({link})"
-                                embed.add_field(name=title, value=value_field, inline=False)
+                            embed.set_author(name="RSI Platform Status", url="https://status.robertsspaceindustries.com/")
                             
                             await ctx.send(embed=embed)
                             
