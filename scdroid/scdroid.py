@@ -633,10 +633,11 @@ class SCDroid(commands.Cog):
             except Exception as e:
                 self.bot.logger.error(f"RSI Scraper Loop Exception ({feed_type}): {e}")
 
-    @sc_base.command(name="fleet")
+    @sc_base.group(name="fleet", invoke_without_command=True)
     async def sc_fleet(self, ctx):
         """View and manage your fleet of ships."""
-        await ctx.send("Fleet management is under development.")
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
 
     @sc_fleet.command(name="list", aliases=["view"])
     async def fleet_list(self, ctx, user: discord.Member = None):
