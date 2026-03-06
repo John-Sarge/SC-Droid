@@ -143,9 +143,38 @@ class SCDroid(commands.Cog):
         except json.JSONDecodeError:
             await ctx.send("Failed to parse the JSON file. Ensure the file is not corrupted.")
 
-    @sc_base.command(name="myfleet")
+    @sc_base.group(name="myfleet", invoke_without_command=True)
     async def sc_myfleet(self, ctx):
         """View a summary of your imported fleet."""
+        fleet = await self.config.user(ctx.author).fleet()
+        if not fleet:
+            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
+            
+        ship_counts = {}
+        for ship in fleet:
+            name = ship.get("name") or ship.get("type") or "Unknown Ship"
+            ship_counts[name] = ship_counts.get(name, 0) + 1
+            
+        # Sort by most numerous ships first
+        sorted_counts = sorted(ship_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        description = f"**Total Ships:** {len(fleet)}\n\n"
+        
+        # Display top 10 most common ships or all if small fleet
+        for name, count in sorted_counts[:15]:
+            description += f"**{count}x** {name}\n"
+            
+        if len(sorted_counts) > 15:
+            description += f"\n*...and {len(sorted_counts) - 15} other variants.*"
+            
+        description += "\n\nUse `[p]sc myfleet list` to see individual ships."
+        
+        embed = discord.Embed(title=f"{ctx.author.display_name}'s Fleet Summary", description=description, color=discord.Color.blue())
+        await ctx.send(embed=embed)
+
+    @sc_myfleet.command(name="list")
+    async def sc_myfleet_list(self, ctx):
+        """List all individual ships in your fleet with pagination."""
         fleet = await self.config.user(ctx.author).fleet()
         if not fleet:
             return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
@@ -179,7 +208,7 @@ class SCDroid(commands.Cog):
             await ctx.send(embed=pages[0], view=view)
         else:
              await ctx.send("No ships found.")
-
+    
     @sc_base.command(name="find")
     async def sc_find(self, ctx, *, query: str):
         """Search for a ship in your personal fleet."""
