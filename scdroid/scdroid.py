@@ -13,8 +13,9 @@ class FleetPaginationView(discord.ui.View):
         self.current_page = 0
         
         # Initial button state
-        self.children[0].disabled = True  # Previous button starts disabled
-        self.children[1].disabled = len(pages) <= 1  # Next button disabled if only 1 page
+        # children[0] is Previous (defined first), children[1] is Next (defined second)
+        self.children[0].disabled = True
+        self.children[1].disabled = len(pages) <= 1
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.author:
@@ -22,21 +23,23 @@ class FleetPaginationView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page += 1
+    # Defined FIRST so it appears on the LEFT
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = max(0, self.current_page - 1)
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page -= 1
+    # Defined SECOND so it appears on the RIGHT
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = min(len(self.pages) - 1, self.current_page + 1)
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
     def update_buttons(self):
-        self.children[0].disabled = self.current_page == 0
-        self.children[1].disabled = self.current_page == len(self.pages) - 1
+        self.children[0].disabled = (self.current_page == 0)
+        self.children[1].disabled = (self.current_page == len(self.pages) - 1)
 
 class SCDroid(commands.Cog):
     """Advanced Star Citizen integration for API telemetry and fleet management."""
