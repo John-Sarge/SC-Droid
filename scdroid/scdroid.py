@@ -144,12 +144,18 @@ class SCDroid(commands.Cog):
             sc_api_key=None, 
             last_comm_link_id=None,
             last_roadmap_id=None,
-            last_dev_id=None
+            last_dev_id=None,
+            last_reddit_id=None
         )
         self.config.register_guild(
             tracked_channel=None,
             track_roadmap=False,
-            track_devtracker=False
+            track_devtracker=False,
+            # Reddit option
+            track_reddit=False
+        )
+        self.config.register_user(
+            fleet=[]
         )
         
         self.session = aiohttp.ClientSession()
@@ -478,7 +484,8 @@ class SCDroid(commands.Cog):
              settings = await self.config.guild(ctx.guild).all()
              msg = "Current Tracking Settings:\n"
              msg += f"**Roadmap:** {'Enabled' if settings['track_roadmap'] else 'Disabled'}\n"
-             msg += f"**Dev Tracker:** {'Enabled' if settings['track_devtracker'] else 'Disabled'}"
+             msg += f"**Dev Tracker:** {'Enabled' if settings['track_devtracker'] else 'Disabled'}\n"
+             msg += f"**Reddit:** {'Enabled' if settings.get('track_reddit', False) else 'Disabled'}"
              await ctx.send(msg)
 
     @sc_track_options.command(name="roadmap")
@@ -492,6 +499,18 @@ class SCDroid(commands.Cog):
         """Toggle Dev Tracker update tracking (True/False)."""
         await self.config.guild(ctx.guild).track_devtracker.set(toggle)
         await ctx.send(f"Dev Tracker updates set to: {toggle}")
+        
+    @sc_track_options.command(name="reddit")
+    async def track_reddit_toggle(self, ctx, toggle: bool):
+        """Toggle Reddit (r/StarCitizen) tracking (True/False)."""
+        await self.config.guild(ctx.guild).track_reddit.set(toggle)
+        await ctx.send(f"Reddit tracking set to: {toggle}")
+        
+    @sc_track_options.command(name="channel")
+    async def track_channel_set(self, ctx, channel: discord.TextChannel):
+        """Set the specific channel for updates (Overrides default)."""
+        await self.config.guild(ctx.guild).tracked_channel.set(channel.id)
+        await ctx.send(f"Updates will be posted to {channel.mention}")
 
     @tasks.loop(minutes=10.0)
     async def rsi_scraper_loop(self):
@@ -504,6 +523,58 @@ class SCDroid(commands.Cog):
             ("devtracker", "https://leonick.se/feeds/devtracker/atom", self.config.last_dev_id, "track_devtracker")
         ]
         
+        # Add Reddit specific logic separately or integrate if possible
+        # Reddit RSS is notoriously flaky without proper headers, so we handle it slightly differently
+        
+        try:
+            guild_config_key_reddit = "track_reddit"
+            last_reddit_id = await self.config.last_reddit_id()
+            if not last_reddit_id:
+                last_reddit_id = "0"
+
+            reddit_url = "https://www.reddit.com/r/starcitizen/new/.rss"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+            
+            async with self.session.get(reddit_url, headers=headers) as response:
+                 if response.status == 200:
+                    xml_data = await response.text()
+                    root = ET.fromstring(xml_data)
+                    ns = {'atom': 'http://www.w3.org/2005/Atom'}
+                    
+                    entries = root.findall('atom:entry', ns)
+                    if entries:
+                        latest_entry = entries[0]
+                        # Reddit IDs are like t3_xyz
+                        entry_id = latest_entry.find('atom:id', ns).text
+                        
+                        if entry_id != last_reddit_id:
+                            await self.config.last_reddit_id.set(entry_id)
+                            
+                            title = latest_entry.find('atom:title', ns).text
+                            link = latest_entry.find('atom:link', ns).attrib['href']
+                            author = latest_entry.find('atom:author', ns).find('atom:name', ns).text
+                            
+                            embed = discord.Embed(
+                                title="New Post on r/StarCitizen",
+                                description=f"**[{title}]({link})**\nby u/{author}",
+                                color=discord.Color.red()
+                            )
+                            embed.set_footer(text="Source: Reddit")
+                            
+                            all_guilds = await self.config.all_guilds()
+                            for guild_id, data in all_guilds.items():
+                                if data.get(guild_config_key_reddit, False):
+                                    channel_id = data.get("tracked_channel")
+                                    if channel_id:
+                                        guild = self.bot.get_guild(guild_id)
+                                        if guild:
+                                            channel = guild.get_channel(channel_id)
+                                            if channel and channel.permissions_for(guild.me).send_messages:
+                                                await channel.send(embed=embed)
+
+        except Exception as e:
+            self.bot.logger.error(f"Reddit Scraper Loop Exception: {e}")
+
         for feed_type, feed_url, config_last_id, guild_config_key in feeds:
             try:
                 # Ensure we have a session to use
@@ -561,3 +632,47 @@ class SCDroid(commands.Cog):
                                             await channel.send(embed=embed)
             except Exception as e:
                 self.bot.logger.error(f"RSI Scraper Loop Exception ({feed_type}): {e}")
+
+    @sc_base.command(name="fleet")
+    async def sc_fleet(self, ctx):
+        """View and manage your fleet of ships."""
+        await ctx.send("Fleet management is under development.")
+
+    @sc_fleet.command(name="list", aliases=["view"])
+    async def fleet_list(self, ctx, user: discord.Member = None):
+        """View your fleet or another user's fleet."""
+        target = user or ctx.author
+        fleet = await self.config.user(target).fleet()
+        
+        if not fleet:
+            return await ctx.send(f"{target.display_name} has no ships in their fleet.")
+            
+        pages = []
+        # Sort fleet by manufacturer then name
+        fleet.sort(key=lambda x: (x['manufacturer'], x['name']))
+        
+        # Group into pages of 5 ships per embed
+        chunk_size = 5
+        chunks = [fleet[i:i + chunk_size] for i in range(0, len(fleet), chunk_size)]
+        
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title=f"{target.display_name}'s Fleet (Page {i + 1}/{len(chunks)})",
+                color=discord.Color.blue()
+            )
+            embed.set_thumbnail(url=target.avatar.url if target.avatar else "")
+            
+            for ship in chunk:
+                desc = f"**Manufacturer:** {ship['manufacturer']}\n"
+                desc += f"**Focus:** {ship['focus']} | **Size:** {ship['size']}\n"
+                desc += f"[Fleetyards Link](https://fleetyards.net/ships/{ship['slug']})"
+                embed.add_field(name=ship['name'], value=desc, inline=False)
+            
+            embed.set_footer(text=f"Total Ships: {len(fleet)}")
+            pages.append(embed)
+            
+        if len(pages) == 1:
+            await ctx.send(embed=pages[0])
+        else:
+            view = FleetPaginationView(pages, ctx.author)
+            await ctx.send(embed=pages[0], view=view)
