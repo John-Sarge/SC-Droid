@@ -195,14 +195,43 @@ class SCDroid(commands.Cog):
                     if not data:
                         return await ctx.send(f"No ships found matching '{ship_name}'.")
                     
-                    # Find the best match
-                    ship = data[0] # Default to first result
-                    # Try to find exact match if possible
+                    search_lower = search_query.lower()
+                    exact_match = None
+                    
+                    # 1. Try to find exact match first
                     for s in data:
-                        if s.get("name", "").lower() == search_query.lower():
-                            ship = s
+                        if s.get("name", "").lower() == search_lower:
+                            exact_match = s
                             break
+                    
+                    if exact_match:
+                        ship = exact_match
+                    elif len(data) > 1:
+                        # If no exact match and multiple results, ask the user to choose
+                        options = "\n".join([f"**{i+1}.** {s.get('name')}" for i, s in enumerate(data[:10])])
+                        embed = discord.Embed(
+                            title="Multiple Ships Found",
+                            description=f"I couldn't find an exact match for '{ship_name}'. Did you mean:\n\n{options}\n\n*Reply with the number of the ship you want.*",
+                            color=discord.Color.gold()
+                        )
+                        await ctx.send(embed=embed)
+                        
+                        def check(m):
+                            return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
                             
+                        try:
+                            msg = await self.bot.wait_for("message", check=check, timeout=30.0)
+                            choice = int(msg.content) - 1
+                            if 0 <= choice < len(data) and choice < 10:
+                                ship = data[choice]
+                            else:
+                                return await ctx.send("Invalid selection.")
+                        except:
+                            return await ctx.send("Selection timed out.")
+                    else:
+                        # unique result but not exact name match (e.g. search "890" -> returns "890 Jump" only)
+                        ship = data[0]
+
                     # Fetch detailed info (though search result is usually detailed enough from FleetYards)
                     embed = discord.Embed(
                         title=ship.get("name"),
