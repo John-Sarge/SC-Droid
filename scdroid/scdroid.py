@@ -186,32 +186,47 @@ class SCDroid(commands.Cog):
         
         async with ctx.typing():
             try:
-                # First, search for the ship to get the slug
-                async with self.session.get(url, params={"name": search_query}) as response:
+                # FleetYards API seems to ignore the 'name' param if it's too short or generic, returning all ships.
+                # However, it doesn't strictly filter server-side well. 
+                # We will fetch, but rely heavily on client-side filtering.
+                async with self.session.get(url) as response:
                     if response.status != 200:
                         return await ctx.send("Could not connect to FleetYards API.")
                     
                     data = await response.json()
                     if not data:
-                        return await ctx.send(f"No ships found matching '{ship_name}'.")
+                        return await ctx.send(f"No ships found.")
                     
                     search_lower = search_query.lower()
-                    exact_match = None
+                    matches = []
                     
-                    # 1. Try to find exact match first
+                    # Filter the data ourselves because the API is returning everything
                     for s in data:
-                        if s.get("name", "").lower() == search_lower:
-                            exact_match = s
-                            break
+                        name = s.get("name", "").lower()
+                        slug = s.get("slug", "").lower()
+                        if search_lower in name or search_lower in slug:
+                            matches.append(s)
+                            
+                    if not matches:
+                        return await ctx.send(f"No ships found matching '{ship_name}'.")
+                    
+                    # Sort matches by length of name to prioritize shorter, more exact matches
+                    # e.g. "Titan" -> "Avenger Titan" (shorter) vs "Avenger Titan Renegade" (longer)
+                    matches.sort(key=lambda x: len(x.get("name", "")))
+                    
+                    # Check for exact match within our filtered list
+                    exact_match = next((s for s in matches if s.get("name", "").lower() == search_lower), None)
                     
                     if exact_match:
                         ship = exact_match
-                    elif len(data) > 1:
-                        # If no exact match and multiple results, ask the user to choose
-                        options = "\n".join([f"**{i+1}.** {s.get('name')}" for i, s in enumerate(data[:10])])
+                    elif len(matches) == 1:
+                        ship = matches[0]
+                    else:
+                        # Multiple partial matches
+                        options = "\n".join([f"**{i+1}.** {s.get('name')}" for i, s in enumerate(matches[:10])])
                         embed = discord.Embed(
                             title="Multiple Ships Found",
-                            description=f"I couldn't find an exact match for '{ship_name}'. Did you mean:\n\n{options}\n\n*Reply with the number of the ship you want.*",
+                            description=f"Found {len(matches)} matches for '{ship_name}'. Did you mean:\n\n{options}\n\n*Reply with the number of the ship you want.*",
                             color=discord.Color.gold()
                         )
                         await ctx.send(embed=embed)
@@ -222,15 +237,12 @@ class SCDroid(commands.Cog):
                         try:
                             msg = await self.bot.wait_for("message", check=check, timeout=30.0)
                             choice = int(msg.content) - 1
-                            if 0 <= choice < len(data) and choice < 10:
-                                ship = data[choice]
+                            if 0 <= choice < len(matches) and choice < 10:
+                                ship = matches[choice]
                             else:
                                 return await ctx.send("Invalid selection.")
                         except:
                             return await ctx.send("Selection timed out.")
-                    else:
-                        # unique result but not exact name match (e.g. search "890" -> returns "890 Jump" only)
-                        ship = data[0]
 
                     # Fetch detailed info (though search result is usually detailed enough from FleetYards)
                     embed = discord.Embed(
