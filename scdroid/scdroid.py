@@ -372,45 +372,61 @@ class SCDroid(commands.Cog):
     @sc_base.command(name="status")
     async def sc_status(self, ctx):
         """Check the current status of the Persistent Universe."""
-        url = "https://status.robertsspaceindustries.com/api/5.0/incidents.json"
+        # The JSON API (incidents.json) is blocked (403). Using the public RSS XML feed instead.
+        url = "https://status.robertsspaceindustries.com/index.xml"
         
         async with ctx.typing():
             try:
-                async with self.session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        incidents = data.get("incidents", [])
+                # User-Agent is required to bypass basic bot protection
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+                
+                async with self.session.get(url, headers=headers) as RP:
+                    if RP.status == 200:
+                        content = await RP.text()
                         
-                        if not incidents:
-                            await ctx.send("No active incidents reported. All systems operational.")
-                            return
-                        
-                        embed = discord.Embed(title="RSI Platform Status", url="https://status.robertsspaceindustries.com/", color=discord.Color.orange())
-                        
-                        for incident in incidents[:3]: # Show top 3 recent incidents
-                            title = incident.get("title", "Unknown Incident")
-                            impact = incident.get("impact", "Unknown")
-                            status = incident.get("status", "Unknown")
-                            id = incident.get("id")
+                        try:
+                            # Basic XML parsing
+                            root = ET.fromstring(content)
+                            channel = root.find("channel")
+                            items = channel.findall("item") if channel is not None else []
                             
-                            value_text = f"**Impact:** {impact}\n**Status:** {status}"
-                            if id:
-                                value_text += f"\n[More Info](https://status.robertsspaceindustries.com/incidents/{id})"
+                            if not items:
+                                await ctx.send("No incidents reported recently.")
+                                return
                             
-                            embed.add_field(
-                                name=title,
-                                value=value_text,
-                                inline=False
+                            embed = discord.Embed(
+                                title="RSI Platform Status", 
+                                url="https://status.robertsspaceindustries.com/", 
+                                color=discord.Color.orange(),
+                                timestamp=ctx.message.created_at
                             )
-                        
-                        if len(incidents) > 3:
-                            embed.set_footer(text=f"And {len(incidents) - 3} more active incidents.")
                             
-                        await ctx.send(embed=embed)
+                            # Show the 3 most recent incidents
+                            for item in items[:3]:
+                                title = item.find("title").text
+                                link = item.find("link").text
+                                description = item.find("description").text or "No details."
+                                
+                                # Simple cleanup of HTML tags commonly found in RSS descriptions
+                                clean_desc = description.replace("<p>", "").replace("</p>", "\n").replace("<strong>", "**").replace("</strong>", "**").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&amp;", "&")
+                                # Remove comments
+                                clean_desc = clean_desc.replace("<!-- raw HTML omitted -->", "")
+                                
+                                if len(clean_desc) > 300:
+                                    clean_desc = clean_desc[:297] + "..."
+                                
+                                value_field = f"{clean_desc}\n[More Info]({link})"
+                                embed.add_field(name=title, value=value_field, inline=False)
+                            
+                            await ctx.send(embed=embed)
+                            
+
+                        except ET.ParseError:
+                             await ctx.send("Failed to parse status feed.")
                     else:
-                        await ctx.send("Could not retrieve status from RSI.")
+                        await ctx.send(f"Could not retrieve status from RSI. HTTP {RP.status}")
             except Exception as e:
-                await ctx.send(f"Failed to reach RSI Status Page: {e}")
+                await ctx.send(f"An error occurred while fetching status: {e}")
 
     @sc_base.command(name="news")
     async def sc_news(self, ctx):
