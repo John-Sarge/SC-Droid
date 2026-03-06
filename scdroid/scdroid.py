@@ -212,14 +212,15 @@ class SCDroid(commands.Cog):
                     )
                     
                     # Store media (Images)
-                    if ship.get("media"):
+                    media = ship.get("media")
+                    if media and isinstance(media, list):
                         # Try to find a store image or generic image
-                        store_img = next((img for img in ship["media"] if img.get("type") == "store_small"), None)
+                        store_img = next((img for img in media if isinstance(img, dict) and img.get("type") == "store_small"), None)
                         if store_img:
                             embed.set_thumbnail(url=store_img.get("href"))
                         
                         # Use a large image for the main embed
-                        large_img = next((img for img in ship["media"] if img.get("type") == "store_large" or img.get("type") == "sketchfab"), None)
+                        large_img = next((img for img in media if isinstance(img, dict) and (img.get("type") == "store_large" or img.get("type") == "sketchfab")), None)
                         if large_img:
                             embed.set_image(url=large_img.get("href"))
                     elif ship.get("storeImage"):
@@ -227,7 +228,13 @@ class SCDroid(commands.Cog):
                          embed.set_thumbnail(url=ship.get("storeImage"))
 
                     # Basic Stats
-                    embed.add_field(name="Manufacturer", value=ship.get("manufacturer", {}).get("name", "Unknown"), inline=True)
+                    manufacturer = ship.get("manufacturer")
+                    if isinstance(manufacturer, dict):
+                        man_name = manufacturer.get("name", "Unknown")
+                    else:
+                        man_name = str(manufacturer) if manufacturer else "Unknown"
+                        
+                    embed.add_field(name="Manufacturer", value=man_name, inline=True)
                     embed.add_field(name="Focus", value=ship.get("focus", "N/A"), inline=True)
                     embed.add_field(name="Size", value=ship.get("size", "N/A"), inline=True)
                     
@@ -236,9 +243,15 @@ class SCDroid(commands.Cog):
                     embed.add_field(name="SCM Speed", value=f"{ship.get('scmSpeed', 'N/A')} m/s", inline=True)
                     embed.add_field(name="Cargo", value=f"{ship.get('cargo', 0)} SCU", inline=True)
                     
-                    price = ship.get("price", {}).get("buy", 0)
-                    if price:
-                         embed.add_field(name="aUEC Price", value=f"{price:,.0f} aUEC", inline=True)
+                    price_val = ship.get("price")
+                    buy_price = 0
+                    if isinstance(price_val, dict):
+                        buy_price = price_val.get("buy", 0)
+                    elif isinstance(price_val, (int, float)):
+                        buy_price = price_val
+
+                    if buy_price:
+                         embed.add_field(name="aUEC Price", value=f"{buy_price:,.0f} aUEC", inline=True)
 
                     await ctx.send(embed=embed)
 
