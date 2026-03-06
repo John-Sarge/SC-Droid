@@ -186,63 +186,104 @@ class SCDroid(commands.Cog):
         
         async with ctx.typing():
             try:
-                # FleetYards API seems to ignore the 'name' param if it's too short or generic, returning all ships.
-                # However, it doesn't strictly filter server-side well. 
-                # We will fetch, but rely heavily on client-side filtering.
+                # FleetYards API seems to need 'slug' or 'name' query params to filter properly.
+                # However, default pagination returns only 30 ships. We need to be clever.
+                # If we pass nothing, we get the first page (starts with 100i).
+                # If we pass 'name', it tries to filter. Let's try passing 'slug' first, then 'name'.
+                
+                # Try fetching by SLUG first (e.g. "avenger-titan")
+                # But 'titan' as a slug search might not work if it expects exact slug matches.
+                # The most reliable way is to fetch ALL ships (heavy) or try a fuzzy search endpoint if it exists.
+                # FleetYards allows 'page' and 'perPage'.
+                
+                # Let's try to pass the search query directly in the URL query string which usually filters.
+                params = {"slug": search_query} 
+                # Why slug? Because searching 'titan' against slug often yields 'avenger-titan'.
+
+                # The previous attempt failed because filtering "name" returned 0 relevant results?
+                # Ah, the terminal output showed that a direct query returned 30 items starting with 100i,
+                # meaning the FILTER param was ignored or malformed.
+                
+                # Let's try downloading a LARGER set of ships to do client-side filtering safely,
+                # OR trust the API filtering if we find the right param.
+                # Documentation says: GET /v1/models?slug=...
+                
                 async with self.session.get(url) as response:
-                    if response.status != 200:
-                        return await ctx.send("Could not connect to FleetYards API.")
+                   # Fetch ALL models is too heavy (hundreds of ships).
+                   pass
+
+                # Let's try the specific search loop.
+                # We will try filtering by name first.
+                async with self.session.get(url, params={"name": search_query}) as response:
+                    data_name = await response.json() if response.status == 200 else []
+                
+                # Then try filtering by slug if name failed or to augment results
+                async with self.session.get(url, params={"slug": search_query}) as response:
+                    data_slug = await response.json() if response.status == 200 else []
                     
-                    data = await response.json()
-                    if not data:
-                        return await ctx.send(f"No ships found.")
-                    
-                    search_lower = search_query.lower()
-                    matches = []
-                    
-                    # Filter the data ourselves because the API is returning everything
-                    for s in data:
-                        name = s.get("name", "").lower()
-                        slug = s.get("slug", "").lower()
-                        if search_lower in name or search_lower in slug:
-                            matches.append(s)
-                            
-                    if not matches:
-                        return await ctx.send(f"No ships found matching '{ship_name}'.")
-                    
-                    # Sort matches by length of name to prioritize shorter, more exact matches
-                    # e.g. "Titan" -> "Avenger Titan" (shorter) vs "Avenger Titan Renegade" (longer)
-                    matches.sort(key=lambda x: len(x.get("name", "")))
-                    
-                    # Check for exact match within our filtered list
-                    exact_match = next((s for s in matches if s.get("name", "").lower() == search_lower), None)
-                    
-                    if exact_match:
-                        ship = exact_match
-                    elif len(matches) == 1:
-                        ship = matches[0]
+                # Combine results
+                data = data_name + data_slug
+                
+                # Remove duplicates based on uuid/id
+                unique_data = {v['uuid']: v for v in data}.values()
+                data = list(unique_data)
+
+                if not data:
+                     # If basic search failed, try without params but with pagination? No, too slow.
+                     # Maybe the user meant "avenger titan"? 
+                     return await ctx.send(f"No ships found matching '{ship_name}'. Try a more specific name like 'Avenger Titan'.")
+                
+                search_lower = search_query.lower()
+                matches = []
+                
+                # Filter locally to be sure
+                for s in data:
+                    name = s.get("name", "").lower()
+                    slug = s.get("slug", "").lower()
+                    # Only keep if it actually matches our query to avoid random noise
+                    if search_lower in name or search_lower in slug:
+                        matches.append(s)
+                
+                if not matches:
+                    # If we have data but no matches after local filter, maybe the API returned random stuff again.
+                    # In that case, trust the API results if they are few.
+                    if len(data) < 5:
+                         matches = data
                     else:
-                        # Multiple partial matches
-                        options = "\n".join([f"**{i+1}.** {s.get('name')}" for i, s in enumerate(matches[:10])])
-                        embed = discord.Embed(
-                            title="Multiple Ships Found",
-                            description=f"Found {len(matches)} matches for '{ship_name}'. Did you mean:\n\n{options}\n\n*Reply with the number of the ship you want.*",
-                            color=discord.Color.gold()
-                        )
-                        await ctx.send(embed=embed)
+                         return await ctx.send(f"No ships found matching '{ship_name}'.");
+
+                # Sort matches by length of name to prioritize shorter, more exact matches
+                matches.sort(key=lambda x: len(x.get("name", "")))
+                
+                # Exact match check
+                exact_match = next((s for s in matches if s.get("name", "").lower() == search_lower), None)
+                
+                if exact_match:
+                    ship = exact_match
+                elif len(matches) == 1:
+                    ship = matches[0]
+                else:
+                    # Multiple partial matches
+                    options = "\n".join([f"**{i+1}.** {s.get('name')}" for i, s in enumerate(matches[:10])])
+                    embed = discord.Embed(
+                        title="Multiple Ships Found",
+                        description=f"Found {len(matches)} matches for '{ship_name}'. Did you mean:\n\n{options}\n\n*Reply with the number of the ship you want.*",
+                        color=discord.Color.gold()
+                    )
+                    await ctx.send(embed=embed)
                         
-                        def check(m):
-                            return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
-                            
-                        try:
-                            msg = await self.bot.wait_for("message", check=check, timeout=30.0)
-                            choice = int(msg.content) - 1
-                            if 0 <= choice < len(matches) and choice < 10:
-                                ship = matches[choice]
-                            else:
-                                return await ctx.send("Invalid selection.")
-                        except:
-                            return await ctx.send("Selection timed out.")
+                    def check(m):
+                        return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
+                        
+                    try:
+                        msg = await self.bot.wait_for("message", check=check, timeout=30.0)
+                        choice = int(msg.content) - 1
+                        if 0 <= choice < len(matches) and choice < 10:
+                            ship = matches[choice]
+                        else:
+                            return await ctx.send("Invalid selection.")
+                    except:
+                        return await ctx.send("Selection timed out.")
 
                     # Fetch detailed info (though search result is usually detailed enough from FleetYards)
                     embed = discord.Embed(
