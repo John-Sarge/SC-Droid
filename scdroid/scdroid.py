@@ -222,11 +222,17 @@ class SCDroid(commands.Cog):
                     data_slug = await response.json() if response.status == 200 else []
                     
                 # Combine results
-                data = data_name + data_slug
+                combined_data = data_name + data_slug
                 
-                # Remove duplicates based on uuid/id
-                unique_data = {v['uuid']: v for v in data}.values()
-                data = list(unique_data)
+                # Remove duplicates based on id (API uses 'id', not 'uuid')
+                unique_data = {}
+                for ship in combined_data:
+                    # Use 'id' as the primary key, fallback to 'slug' if id is missing for some reason
+                    key = ship.get('id') or ship.get('slug')
+                    if key:
+                        unique_data[key] = ship
+                
+                data = list(unique_data.values())
 
                 if not data:
                      # If basic search failed, try without params but with pagination? No, too slow.
