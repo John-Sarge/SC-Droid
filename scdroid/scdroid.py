@@ -251,6 +251,178 @@ class SCDroid(commands.Cog):
             
         await ctx.send(embed=embed)
 
+    @sc_base.command(name="ship")
+    async def sc_ship(self, ctx, *, ship_name: str):
+        """Search for a ship on FleetYards and display its statistics."""
+        url = "https://api.fleetyards.net/v1/models"
+        params = {"name": ship_name}
+        
+        async with ctx.typing():
+            try:
+                async with self.session.get(url, params=params) as response:
+                    if response.status != 200:
+                        return await ctx.send(f"FleetYards API returned an error: {response.status}")
+                    
+                    data = await response.json()
+                    # FleetYards returns a list or direct object depending on endpoint, usually list for search
+                    if not data:
+                        return await ctx.send(f"No ships found matching '{ship_name}'.")
+                    
+                    # Exact match or first result
+                    ship = data[0] if isinstance(data, list) else data
+                    
+                    embed = discord.Embed(
+                        title=f"{ship.get('name', 'Unknown')} ({ship.get('manufacturer', {}).get('code', 'UNK')})",
+                        url=f"https://fleetyards.net/ships/{ship.get('slug')}",
+                        color=discord.Color.dark_red()
+                    )
+                    
+                    if ship.get("storeImage"):
+                        embed.set_image(url=ship["storeImage"])
+                    elif ship.get("image"):
+                        embed.set_image(url=ship["image"])
+                        
+                    manufacturer = ship.get("manufacturer", {}).get("name", "Unknown")
+                    embed.add_field(name="Manufacturer", value=manufacturer, inline=True)
+                    embed.add_field(name="Focus", value=ship.get("focus", "N/A"), inline=True)
+                    embed.add_field(name="Class", value=ship.get("classification", "N/A"), inline=True)
+                    
+                    # Stats
+                    stats = []
+                    if ship.get("price"): stats.append(f"Price: ${ship['price']}")
+                    if ship.get("maxCrew"): stats.append(f"Max Crew: {ship['maxCrew']}")
+                    if ship.get("cargo"): stats.append(f"Cargo: {ship['cargo']} SCU")
+                    if ship.get("scmSpeed"): stats.append(f"SCM Speed: {ship['scmSpeed']} m/s")
+                    if ship.get("afterburnerSpeed"): stats.append(f"Max Speed: {ship['afterburnerSpeed']} m/s")
+                    
+                    embed.add_field(name="Specifications", value="\n".join(stats) or "No stats available", inline=False)
+                    embed.add_field(name="Status", value=ship.get("productionStatus", "Unknown"), inline=True)
+                    
+                    await ctx.send(embed=embed)
+                    
+            except Exception as e:
+                await ctx.send(f"Failed to query FleetYards: {e}")
+
+    @sc_base.command(name="org")
+    async def sc_org(self, ctx, symbol: str):
+        """Retrieve a Star Citizen Organization profile."""
+        api_key = await self.config.sc_api_key()
+        if not api_key:
+            return await ctx.send("The API key has not been set by the bot owner yet. Use `[p]sc setkey`.")
+            
+        url = f"https://api.starcitizen-api.com/{api_key}/v1/auto/organization/{symbol}"
+        
+        async with ctx.typing():
+            try:
+                async with self.session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get("success") == 1:
+                            org = data["data"]
+                            
+                            embed = discord.Embed(
+                                title=f"{org.get('name')} [{org.get('sid')}]",
+                                url=org.get("url", ""),
+                                description=org.get("headline", ""),
+                                color=discord.Color.blurple()
+                            )
+                            
+                            if org.get("logo"):
+                                embed.set_thumbnail(url=org["logo"])
+                            
+                            if org.get("banner"):
+                                embed.set_image(url=org["banner"])
+                                
+                            embed.add_field(name="Archetype", value=org.get("archetype", "N/A"), inline=True)
+                            embed.add_field(name="Members", value=str(org.get("members", "N/A")), inline=True)
+                            embed.add_field(name="Primary Language", value=org.get("lang", "N/A"), inline=True)
+                            
+                            # Focus
+                            focus = [org.get("primaryActivity"), org.get("secondaryActivity")]
+                            focus = [f for f in focus if f]
+                            if focus:
+                                embed.add_field(name="Focus", value=", ".join(focus), inline=False)
+                                
+                            await ctx.send(embed=embed)
+                        else:
+                            await ctx.send("Organization not found or API returned an error.")
+                    else:
+                        await ctx.send(f"Upstream API Error: HTTP {response.status}")
+            except Exception as e:
+                await ctx.send(f"Failed to reach the Star Citizen API: {e}")
+
+    @sc_base.command(name="addship")
+    async def sc_addship(self, ctx, *, ship_name: str):
+        """Add a ship to your personal fleet by searching FleetYards."""
+        # Search FleetYards first to get standardized data
+        url = "https://api.fleetyards.net/v1/models"
+        params = {"name": ship_name}
+        
+        async with ctx.typing():
+            try:
+                async with self.session.get(url, params=params) as response:
+                    if response.status != 200:
+                        return await ctx.send("Could not verify ship with FleetYards.")
+                        
+                    data = await response.json()
+                    if not data:
+                        return await ctx.send(f"No ships found matching '{ship_name}'.")
+                    
+                    found_ship = data[0] if isinstance(data, list) else data
+                    
+                    # Construct the ship object to match the schema used by importfleet
+                    new_ship = {
+                        "name": found_ship.get("name"),
+                        "manufacturerName": found_ship.get("manufacturer", {}).get("name", "Unknown"),
+                        "manufacturerCode": found_ship.get("manufacturer", {}).get("code", "UNK"),
+                        "slug": found_ship.get("slug"),
+                        "shipName": None
+                    }
+                    
+                    fleet = await self.config.user(ctx.author).fleet()
+                    if fleet is None:
+                        fleet = []
+                    
+                    # Check for duplicates (optional, but good practice)
+                    # We'll allow duplicates if they want multiple of same ship, 
+                    # but maybe warn? For now, just add.
+                    fleet.append(new_ship)
+                    
+                    await self.config.user(ctx.author).fleet.set(fleet)
+                    await ctx.send(f"Added **{new_ship['name']}** to your fleet.")
+                    
+            except Exception as e:
+                await ctx.send(f"Error adding ship: {e}")
+
+    @sc_base.command(name="removeship")
+    async def sc_removeship(self, ctx, *, ship_name: str):
+        """Remove a ship from your personal fleet."""
+        fleet = await self.config.user(ctx.author).fleet()
+        if not fleet:
+            return await ctx.send("Your hangar is empty.")
+            
+        found = False
+        new_fleet = []
+        ship_name_lower = ship_name.lower()
+        
+        for ship in fleet:
+            if not found:
+                name = (ship.get("name") or "").lower()
+                custom = (ship.get("shipName") or "").lower()
+                
+                # Try to fuzzy match or exact match
+                if ship_name_lower == name or ship_name_lower == custom or ship_name_lower in name:
+                    found = True
+                    continue # Remove this one
+            
+            new_fleet.append(ship)
+            
+        if found:
+            await self.config.user(ctx.author).fleet.set(new_fleet)
+            await ctx.send(f"Removed **{ship_name}** from your fleet.")
+        else:
+            await ctx.send(f"Could not find a ship named '{ship_name}' in your fleet.")
+
     @sc_base.command(name="status")
     async def sc_status(self, ctx):
         """Check the current status of the Persistent Universe."""
