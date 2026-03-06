@@ -50,9 +50,17 @@ class SCDroid(commands.Cog):
         self.config = Config.get_conf(self, identifier=847362948573, force_registration=True)
         
         # Define schemas based on scope
-        self.config.register_global(sc_api_key=None, last_comm_link_id=None)
-        self.config.register_guild(tracked_channel=None)
-        self.config.register_user(fleet=None)
+        self.config.register_global(
+            sc_api_key=None, 
+            last_comm_link_id=None,
+            last_roadmap_id=None,
+            last_dev_id=None
+        )
+        self.config.register_guild(
+            tracked_channel=None,
+            track_roadmap=False,
+            track_devtracker=False
+        )
         
         self.session = aiohttp.ClientSession()
         self.rsi_scraper_loop.start()
@@ -105,6 +113,8 @@ class SCDroid(commands.Cog):
                             
                             if org:
                                 embed.add_field(name="Organization", value=f"{org.get('name')} ({org.get('sid')})", inline=False)
+                                if org.get('image'):
+                                    embed.set_footer(text=f"Member of {org.get('name')}", icon_url=org.get('image'))
                             
                             await ctx.send(embed=embed)
                         else:
@@ -114,142 +124,116 @@ class SCDroid(commands.Cog):
             except Exception as e:
                 await ctx.send(f"Failed to reach the Star Citizen API: {e}")
 
-    @sc_base.command(name="importfleet")
-    async def sc_importfleet(self, ctx):
-        """Import your personal fleet from a FleetYards or Hangar XPLORer JSON file."""
-        if not ctx.message.attachments:
-            return await ctx.send("Please attach your exported JSON file to the command message.")
+    @sc_base.command(name="org")
+    async def sc_org(self, ctx, sid: str):
+        """Retrieve a Star Citizen Organization profile."""
+        api_key = await self.config.sc_api_key()
+        if not api_key:
+            return await ctx.send("The API key has not been set by the bot owner yet. Use `[p]sc setkey`.")
             
-        attachment = ctx.message.attachments[0]
+        url = f"https://api.starcitizen-api.com/{api_key}/v1/auto/organization/{sid}"
         
-        if not attachment.filename.lower().endswith('.json'):
-            return await ctx.send("The attached file must be a .json file.")
-            
-        try:
-            file_bytes = await attachment.read()
-            fleet_data = json.loads(file_bytes)
-            
-            # Simple validation to ensure it's a list format before saving
-            if isinstance(fleet_data, list):
-                await self.config.user(ctx.author).fleet.set(fleet_data)
-                
-                # Report stats
-                count = len(fleet_data)
-                manufacturers = set(s.get("manufacturerCode", "Unknown") for s in fleet_data if isinstance(s, dict))
-                
-                await ctx.send(f"Successfully imported {count} ships from {len(manufacturers)} manufacturers into your personal database!")
-            else:
-                await ctx.send("Invalid JSON format. Expected a list structure.")
-        except json.JSONDecodeError:
-            await ctx.send("Failed to parse the JSON file. Ensure the file is not corrupted.")
+        async with ctx.typing():
+            try:
+                async with self.session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get("success") == 1:
+                            org = data["data"]
+                            
+                            embed = discord.Embed(
+                                title=f"{org.get('name')} [{org.get('sid')}]",
+                                url=org.get('url', ''),
+                                description=org.get('headline', ''),
+                                color=discord.Color.brand_red()
+                            )
+                            embed.set_thumbnail(url=org.get('logo', ''))
+                            embed.set_image(url=org.get('banner', ''))
+                            
+                            embed.add_field(name="Archetype", value=org.get('archetype', 'N/A'), inline=True)
+                            embed.add_field(name="Members", value=str(org.get('members', 'N/A')), inline=True)
+                            embed.add_field(name="Language", value=org.get('lang', 'N/A'), inline=True)
+                            
+                            if org.get('recruiting'):
+                                embed.add_field(name="Recruiting", value="Active", inline=True)
+                            else:
+                                embed.add_field(name="Recruiting", value="Closed", inline=True)
 
-    @sc_base.group(name="myfleet", invoke_without_command=True)
-    async def sc_myfleet(self, ctx):
-        """View a summary of your imported fleet."""
-        fleet = await self.config.user(ctx.author).fleet()
-        if not fleet:
-            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
-        
-        # Calculate ship counts
-        total_ships = len(fleet)
-        
-        # Manufacturer breakdown
-        manufacturers = {}
-        for ship in fleet:
-            man = ship.get("manufacturerName", "Unknown")
-            manufacturers[man] = manufacturers.get(man, 0) + 1
-            
-        sorted_man = sorted(manufacturers.items(), key=lambda x: x[1], reverse=True)
-        
-        embed = discord.Embed(title=f"{ctx.author.display_name}'s Fleet Summary", color=discord.Color.blue())
-        
-        embed.description = (
-            f"**Total:**\n{total_ships} ships\n\n"
-            f"**Manufacturer Focus:**\n" + 
-            "\n".join([f"{man}: {count} ships" for man, count in sorted_man[:3]])
-        )
-        
-        embed.set_footer(text="Use `[p]sc myfleet list` to see individual ships.")
-        await ctx.send(embed=embed)
+                            await ctx.send(embed=embed)
+                        else:
+                            await ctx.send(f"Organization '{sid}' not found.")
+                    else:
+                        await ctx.send(f"Upstream API Error: HTTP {response.status}")
+            except Exception as e:
+                await ctx.send(f"Failed to reach the Star Citizen API: {e}")
 
-    @sc_myfleet.command(name="list")
-    async def sc_myfleet_list(self, ctx):
-        """List all individual ships in your fleet with pagination."""
-        fleet = await self.config.user(ctx.author).fleet()
-        if not fleet:
-            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
-            
-        # Sort by name for cleaner display
-        sorted_fleet = sorted(fleet, key=lambda x: x.get("name", ""))
+    @sc_base.command(name="ship")
+    async def sc_ship(self, ctx, *, ship_name: str):
+        """Lookup ship statistics from the global FleetYards database."""
+        # Clean up the name for a slightly better search (FleetYards is forgiving but simple)
+        search_query = ship_name.strip()
+        url = "https://api.fleetyards.net/v1/models"
         
-        pages = []
-        chunk_size = 15
-        chunks = [sorted_fleet[i:i + chunk_size] for i in range(0, len(sorted_fleet), chunk_size)]
-        
-        for i, chunk in enumerate(chunks):
-            display_lines = []
-            for ship in chunk:
-                # Handle different JSON formats (FleetYards vs Hangar XPLORer)
-                name = ship.get("name") or ship.get("type") or "Unknown Ship"
-                custom_name = ship.get("shipName")
-                
-                if custom_name:
-                    display_lines.append(f"**{custom_name}** ({name})")
-                else:
-                    display_lines.append(name)
-            
-            embed = discord.Embed(title=f"{ctx.author.display_name}'s Hangar", color=discord.Color.green())
-            embed.description = "\n".join(display_lines)
-            embed.set_footer(text=f"Page {i+1} of {len(chunks)} | Total ships: {len(sorted_fleet)}")
-            pages.append(embed)
+        async with ctx.typing():
+            try:
+                # First, search for the ship to get the slug
+                async with self.session.get(url, params={"name": search_query}) as response:
+                    if response.status != 200:
+                        return await ctx.send("Could not connect to FleetYards API.")
+                    
+                    data = await response.json()
+                    if not data:
+                        return await ctx.send(f"No ships found matching '{ship_name}'.")
+                    
+                    # Find the best match
+                    ship = data[0] # Default to first result
+                    # Try to find exact match if possible
+                    for s in data:
+                        if s.get("name", "").lower() == search_query.lower():
+                            ship = s
+                            break
+                            
+                    # Fetch detailed info (though search result is usually detailed enough from FleetYards)
+                    embed = discord.Embed(
+                        title=ship.get("name"),
+                        url=f"https://fleetyards.net/ships/{ship.get('slug')}",
+                        description=ship.get("description", "No description available.")[:500] + "...",
+                        color=discord.Color.dark_grey()
+                    )
+                    
+                    # Store media (Images)
+                    if ship.get("media"):
+                        # Try to find a store image or generic image
+                        store_img = next((img for img in ship["media"] if img.get("type") == "store_small"), None)
+                        if store_img:
+                            embed.set_thumbnail(url=store_img.get("href"))
+                        
+                        # Use a large image for the main embed
+                        large_img = next((img for img in ship["media"] if img.get("type") == "store_large" or img.get("type") == "sketchfab"), None)
+                        if large_img:
+                            embed.set_image(url=large_img.get("href"))
+                    elif ship.get("storeImage"):
+                         # Fallback if media array structure differs
+                         embed.set_thumbnail(url=ship.get("storeImage"))
 
-        if len(pages) > 0:
-            view = FleetPaginationView(pages, ctx.author)
-            await ctx.send(embed=pages[0], view=view)
-        else:
-             await ctx.send("No ships found.")
-    
-    @sc_base.command(name="find")
-    async def sc_find(self, ctx, *, query: str):
-        """Search for a ship in your personal fleet."""
-        fleet = await self.config.user(ctx.author).fleet()
-        if not fleet:
-            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
-            
-        query = query.lower()
-        matches = []
-        for ship in fleet:
-            # Check safely for name, shipName, and manufacturer
-            name = (ship.get("name") or "").lower()
-            custom_name = (ship.get("shipName") or "").lower()
-            manufacturer = (ship.get("manufacturerName") or "").lower()
-            
-            if query in name or query in custom_name or query in manufacturer:
-                matches.append(ship)
-        
-        if not matches:
-            return await ctx.send(f"No ships found matching '{query}'.")
-            
-        embed = discord.Embed(title=f"Fleet Search: {query}", color=discord.Color.blue())
-        
-        for ship in matches[:10]:
-            name = ship.get("name", "Unknown")
-            custom_name = ship.get("shipName")
-            manufacturer = ship.get("manufacturerCode", "Unknown")
-            slug = ship.get("slug")
-            
-            display_title = f"{name} - '{custom_name}'" if custom_name else name
-            
-            details = f"**Manufacturer:** {manufacturer}"
-            if slug:
-                details += f"\n[View on FleetYards](https://fleetyards.net/ships/{slug})"
-            
-            embed.add_field(name=display_title, value=details, inline=False)
-            
-        if len(matches) > 10:
-            embed.set_footer(text=f"Showing top 10 of {len(matches)} matches.")
-            
-        await ctx.send(embed=embed)
+                    # Basic Stats
+                    embed.add_field(name="Manufacturer", value=ship.get("manufacturer", {}).get("name", "Unknown"), inline=True)
+                    embed.add_field(name="Focus", value=ship.get("focus", "N/A"), inline=True)
+                    embed.add_field(name="Size", value=ship.get("size", "N/A"), inline=True)
+                    
+                    # Technical Stats
+                    embed.add_field(name="Crew", value=f"{ship.get('minCrew', '?')} - {ship.get('maxCrew', '?')}", inline=True)
+                    embed.add_field(name="SCM Speed", value=f"{ship.get('scmSpeed', 'N/A')} m/s", inline=True)
+                    embed.add_field(name="Cargo", value=f"{ship.get('cargo', 0)} SCU", inline=True)
+                    
+                    price = ship.get("price", {}).get("buy", 0)
+                    if price:
+                         embed.add_field(name="aUEC Price", value=f"{price:,.0f} aUEC", inline=True)
+
+                    await ctx.send(embed=embed)
+
+            except Exception as e:
+                await ctx.send(f"Failed to query FleetYards: {e}")
 
     @sc_base.command(name="status")
     async def sc_status(self, ctx):
@@ -331,60 +315,94 @@ class SCDroid(commands.Cog):
     @sc_base.command(name="track")
     @commands.has_permissions(manage_channels=True)
     async def sc_track(self, ctx, channel: discord.TextChannel = None):
-        """Set the channel for automated RSI Comm-Link updates."""
+        """Set the channel for automated RSI updates (Comm-Links)."""
         channel = channel or ctx.channel
         await self.config.guild(ctx.guild).tracked_channel.set(channel.id)
-        await ctx.send(f"RSI website tracking has been enabled. Updates will be posted in {channel.mention}.")
+        await ctx.send(f"RSI website tracking has been enabled. Comm-Link updates will be posted in {channel.mention}.\nUse `[p]sc track options` to enable Roadmap or Dev Tracker alerts.")
+
+    @sc_base.group(name="trackopts")
+    @commands.has_permissions(manage_channels=True)
+    async def sc_track_options(self, ctx):
+        """Configure which RSI feeds to track (Roadmap, Dev Tracker)."""
+        if ctx.invoked_subcommand is None:
+             settings = await self.config.guild(ctx.guild).all()
+             msg = "Current Tracking Settings:\n"
+             msg += f"**Roadmap:** {'Enabled' if settings['track_roadmap'] else 'Disabled'}\n"
+             msg += f"**Dev Tracker:** {'Enabled' if settings['track_devtracker'] else 'Disabled'}"
+             await ctx.send(msg)
+
+    @sc_track_options.command(name="roadmap")
+    async def track_roadmap_toggle(self, ctx, toggle: bool):
+        """Toggle Roadmap update tracking (True/False)."""
+        await self.config.guild(ctx.guild).track_roadmap.set(toggle)
+        await ctx.send(f"Roadmap tracking set to: {toggle}")
+
+    @sc_track_options.command(name="devtracker")
+    async def track_dev_toggle(self, ctx, toggle: bool):
+        """Toggle Dev Tracker update tracking (True/False)."""
+        await self.config.guild(ctx.guild).track_devtracker.set(toggle)
+        await ctx.send(f"Dev Tracker updates set to: {toggle}")
 
     @tasks.loop(minutes=10.0)
     async def rsi_scraper_loop(self):
         """Periodic background loop for RSI website telemetry extraction."""
-        await self.bot.wait_until_ready() # Ensure WebSocket is ready before scraping
+        await self.bot.wait_until_ready()
         
-        # Utilizing community Atom feed for resilient tracking against RSI layout changes
-        feed_url = "https://leonick.se/feeds/rsi/atom"
+        feeds = [
+            ("comm-link", "https://leonick.se/feeds/rsi/atom", self.config.last_comm_link_id, None), # Always tracks if channel set
+            ("roadmap", "https://leonick.se/feeds/roadmap/atom", self.config.last_roadmap_id, "track_roadmap"),
+            ("devtracker", "https://leonick.se/feeds/devtracker/atom", self.config.last_dev_id, "track_devtracker")
+        ]
         
-        try:
-            async with self.session.get(feed_url) as response:
-                if response.status!= 200:
-                    return
-                
-                xml_data = await response.text()
-                root = ET.fromstring(xml_data)
-                
-                # XML namespaces required for Atom feeds
-                ns = {'atom': 'http://www.w3.org/2005/Atom'}
-                
-                # Extract the most recently published entry
-                latest_entry = root.find('atom:entry', ns)
-                if latest_entry is None:
-                    return
+        for feed_type, feed_url, config_last_id, guild_config_key in feeds:
+            try:
+                async with self.session.get(feed_url) as response:
+                    if response.status != 200:
+                        continue
                     
-                entry_id = latest_entry.find('atom:id', ns).text
-                title = latest_entry.find('atom:title', ns).text
-                link = latest_entry.find('atom:link', ns).attrib['href']
-                
-                last_known_id = await self.config.last_comm_link_id()
-                
-                # Delta Check: Broadcast if the ID does not match our known cache
-                if entry_id!= last_known_id:
-                    await self.config.last_comm_link_id.set(entry_id)
+                    xml_data = await response.text()
+                    root = ET.fromstring(xml_data)
+                    ns = {'atom': 'http://www.w3.org/2005/Atom'}
                     
-                    embed = discord.Embed(
-                        title="New RSI Comm-Link",
-                        description=f"**{title}**\n({link})",
-                        color=discord.Color.gold()
-                    )
+                    latest_entry = root.find('atom:entry', ns)
+                    if latest_entry is None:
+                        continue
+                        
+                    entry_id = latest_entry.find('atom:id', ns).text
+                    title = latest_entry.find('atom:title', ns).text
+                    link = latest_entry.find('atom:link', ns).attrib['href']
+                    content_element = latest_entry.find('atom:content', ns)
+                    summary = content_element.text[:300] + "..." if content_element and content_element.text else "Click link for details."
                     
-                    # Iterate over guilds and dispatch
-                    all_guilds = await self.config.all_guilds()
-                    for guild_id, data in all_guilds.items():
-                        channel_id = data.get("tracked_channel")
-                        if channel_id:
-                            guild = self.bot.get_guild(guild_id)
-                            if guild:
-                                channel = guild.get_channel(channel_id)
-                                if channel:
-                                    await channel.send(embed=embed)
-        except Exception as e:
-            self.bot.logger.error(f"RSI Scraper Loop Exception: {e}")
+                    last_known_id = await config_last_id()
+                    
+                    if entry_id != last_known_id:
+                        await config_last_id.set(entry_id)
+                        
+                        feed_titles = {
+                            "comm-link": "New RSI Comm-Link",
+                            "roadmap": "RSI Roadmap Update",
+                            "devtracker": "RSI Dev Tracker Post"
+                        }
+                        
+                        embed = discord.Embed(
+                            title=feed_titles.get(feed_type, "RSI Update"),
+                            description=f"**[{title}]({link})**\n\n{summary}",
+                            color=discord.Color.gold()
+                        )
+                        embed.set_footer(text=f"Source: {feed_type.title()}")
+                        
+                        all_guilds = await self.config.all_guilds()
+                        for guild_id, data in all_guilds.items():
+                            channel_id = data.get("tracked_channel")
+                            if channel_id:
+                                # Check if this specific feed type is enabled for this guild
+                                # Comm-links are enabled by default if a channel is set (guild_config_key is None)
+                                if (guild_config_key is None) or (data.get(guild_config_key, False)):
+                                    guild = self.bot.get_guild(guild_id)
+                                    if guild:
+                                        channel = guild.get_channel(channel_id)
+                                        if channel:
+                                            await channel.send(embed=embed)
+            except Exception as e:
+                self.bot.logger.error(f"RSI Scraper Loop Exception ({feed_type}): {e}")
