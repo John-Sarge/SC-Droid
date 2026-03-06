@@ -37,9 +37,99 @@ class FleetPaginationView(discord.ui.View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
-    def update_buttons(self):
+    async def update_view(self, interaction: discord.Interaction):
+        # Disable Prev if on page 0, disable Next if on last page
         self.children[0].disabled = (self.current_page == 0)
         self.children[1].disabled = (self.current_page == len(self.pages) - 1)
+        
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+class ShipSelectionView(discord.ui.View):
+    def __init__(self, matches, author, bot, original_ctx):
+        super().__init__(timeout=60)
+        self.matches = matches
+        self.author = author
+        self.bot = bot
+        self.original_ctx = original_ctx
+        
+        # Create select menu options (max 25)
+        options = []
+        for i, ship in enumerate(matches[:25]):
+            options.append(discord.SelectOption(
+                label=ship.get("name", "Unknown")[:100],
+                description=ship.get("slug", "")[:100],
+                value=str(i)
+            ))
+
+        self.select_menu = discord.ui.Select(
+            placeholder="Select a ship...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+        self.select_menu.callback = self.select_callback
+        self.add_item(self.select_menu)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("This menu is not for you.", ephemeral=True)
+            return False
+        return True
+
+    async def select_callback(self, interaction: discord.Interaction):
+        # Disable the view so they can't click again
+        self.stop() 
+        selected_index = int(self.select_menu.values[0])
+        selected_ship = self.matches[selected_index]
+        
+        # Call a helper method on the cog instance if possible, or just build the embed here.
+        # Since I don't have easy access to 'self' (the cog), I will replicate the embed building logic here 
+        # or better yet, inject the build function.
+        # Actually, let's just trigger a new task or modify the message directly.
+        
+        # We need to construct the embed for the selected ship.
+        embed = self.build_ship_embed(selected_ship)
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
+
+    def build_ship_embed(self, ship):
+        s_name = ship.get("name", "Unknown Ship")
+        s_desc = ship.get("description", "No description available.")
+        s_focus = ship.get("focus", "N/A")
+        s_size = ship.get("sizeLabel", "N/A")
+        
+        min_crew = ship.get("minCrew", "?")
+        max_crew = ship.get("maxCrew", "?")
+        s_crew = f"{min_crew} - {max_crew}" if min_crew != max_crew else str(min_crew)
+        
+        s_price = ship.get("priceLabel", "Not available in-game")
+        s_pledge = ship.get("pledgePriceLabel", "N/A")
+        
+        media = ship.get("media", {})
+        store_img = media.get("storeImage")
+        
+        img_main = None
+        if isinstance(store_img, dict):
+            img_main = store_img.get("large") or store_img.get("medium") or store_img.get("source")
+        elif isinstance(store_img, str):
+            img_main = store_img
+
+        embed = discord.Embed(title=s_name, description=s_desc[:2048], color=discord.Color.dark_red())
+        if img_main:
+            embed.set_image(url=img_main)
+        
+        manufacturer = ship.get("manufacturer", {}).get("name", "Unknown")
+        embed.add_field(name="Manufacturer", value=manufacturer, inline=True)
+        embed.add_field(name="Focus", value=s_focus, inline=True)
+        embed.add_field(name="Size", value=s_size, inline=True)
+        embed.add_field(name="Crew", value=s_crew, inline=True)
+        embed.add_field(name="Price (aUEC)", value=str(s_price), inline=True)
+        embed.add_field(name="Pledge", value=str(s_pledge), inline=True)
+        
+        slug = ship.get("slug")
+        if slug:
+            embed.add_field(name="FleetYards Link", value=f"https://fleetyards.net/ships/{slug}", inline=False)
+            
+        return embed
 
 class SCDroid(commands.Cog):
     """Advanced Star Citizen integration for API telemetry and fleet management."""
@@ -180,171 +270,104 @@ class SCDroid(commands.Cog):
     @sc_base.command(name="ship")
     async def sc_ship(self, ctx, *, ship_name: str):
         """Lookup ship statistics from the global FleetYards database."""
-        # Clean up the name for a slightly better search (FleetYards is forgiving but simple)
-        search_query = ship_name.strip()
+        ship_name = ship_name.strip()
         url = "https://api.fleetyards.net/v1/models"
         
         async with ctx.typing():
             try:
-                # FleetYards API seems to need 'slug' or 'name' query params to filter properly.
-                # However, default pagination returns only 30 ships. We need to be clever.
-                # If we pass nothing, we get the first page (starts with 100i).
-                # If we pass 'name', it tries to filter. Let's try passing 'slug' first, then 'name'.
+                # The FleetYards API partial search is unreliable for non-exact slugs.
+                # We will fetch all models (pagination required) and filter locally.
+                # Currently ~230 models, so 2 pages of 200 covers it effectively.
                 
-                # Try fetching by SLUG first (e.g. "avenger-titan")
-                # But 'titan' as a slug search might not work if it expects exact slug matches.
-                # The most reliable way is to fetch ALL ships (heavy) or try a fuzzy search endpoint if it exists.
-                # FleetYards allows 'page' and 'perPage'.
+                combined_data = []
+                async with self.session.get(url, params={"page": 1, "perPage": 200}) as r1:
+                    if r1.status == 200:
+                        combined_data.extend(await r1.json())
                 
-                # Let's try to pass the search query directly in the URL query string which usually filters.
-                params = {"slug": search_query} 
-                # Why slug? Because searching 'titan' against slug often yields 'avenger-titan'.
+                # Fetch page 2 just to be safe
+                async with self.session.get(url, params={"page": 2, "perPage": 200}) as r2:
+                     if r2.status == 200:
+                        combined_data.extend(await r2.json())
 
-                # The previous attempt failed because filtering "name" returned 0 relevant results?
-                # Ah, the terminal output showed that a direct query returned 30 items starting with 100i,
-                # meaning the FILTER param was ignored or malformed.
+                if not combined_data:
+                    return await ctx.send("FleetYards API returned no data. Please try again later.")
                 
-                # Let's try downloading a LARGER set of ships to do client-side filtering safely,
-                # OR trust the API filtering if we find the right param.
-                # Documentation says: GET /v1/models?slug=...
-                
-                async with self.session.get(url) as response:
-                   # Fetch ALL models is too heavy (hundreds of ships).
-                   pass
-
-                # Let's try the specific search loop.
-                # We will try filtering by name first.
-                async with self.session.get(url, params={"name": search_query}) as response:
-                    data_name = await response.json() if response.status == 200 else []
-                
-                # Then try filtering by slug if name failed or to augment results
-                async with self.session.get(url, params={"slug": search_query}) as response:
-                    data_slug = await response.json() if response.status == 200 else []
-                    
-                # Combine results
-                combined_data = data_name + data_slug
-                
-                # Remove duplicates based on id (API uses 'id', not 'uuid')
-                unique_data = {}
-                for ship in combined_data:
-                    # Use 'id' as the primary key, fallback to 'slug' if id is missing for some reason
-                    key = ship.get('id') or ship.get('slug')
-                    if key:
-                        unique_data[key] = ship
-                
-                data = list(unique_data.values())
-
-                if not data:
-                     # If basic search failed, try without params but with pagination? No, too slow.
-                     # Maybe the user meant "avenger titan"? 
-                     return await ctx.send(f"No ships found matching '{ship_name}'. Try a more specific name like 'Avenger Titan'.")
-                
-                search_lower = search_query.lower()
+                search_lower = ship_name.lower()
                 matches = []
                 
-                # Filter locally to be sure
-                for s in data:
+                for s in combined_data:
                     name = s.get("name", "").lower()
                     slug = s.get("slug", "").lower()
-                    # Only keep if it actually matches our query to avoid random noise
+                    
+                    if name == search_lower or slug == search_lower:
+                        matches = [s] # Exact match found, stop searching
+                        break
+                    
                     if search_lower in name or search_lower in slug:
                         matches.append(s)
                 
                 if not matches:
-                    # If we have data but no matches after local filter, maybe the API returned random stuff again.
-                    # In that case, trust the API results if they are few.
-                    if len(data) < 5:
-                         matches = data
-                    else:
-                         return await ctx.send(f"No ships found matching '{ship_name}'.");
-
-                # Sort matches by length of name to prioritize shorter, more exact matches
-                matches.sort(key=lambda x: len(x.get("name", "")))
+                    return await ctx.send(f"No ships found matching '{ship_name}'. Try a more specific name like 'Avenger Titan'.")
                 
-                # Exact match check
-                exact_match = next((s for s in matches if s.get("name", "").lower() == search_lower), None)
+                # If multiple matches, force selection
+                if len(matches) > 1:
+                     matches.sort(key=lambda x: len(x.get("name", "")))
+                     view = ShipSelectionView(matches[:25], ctx.author, self.bot, ctx)
+                     await ctx.send(f"Found {len(matches)} ships matching '{ship_name}'. Please select one:", view=view)
+                     return
+
+                ship = matches[0]
+
+                # Reuse the embed builder from the view appropriately or inline logical
+                # Since we can't easily access the View method without instantiating, 
+                # let's just use the View to build it for consistency, or duplicate the logic slightly cleaned up.
                 
-                if exact_match:
-                    ship = exact_match
-                elif len(matches) == 1:
-                    ship = matches[0]
-                else:
-                    # Multiple partial matches
-                    options = "\n".join([f"**{i+1}.** {s.get('name')}" for i, s in enumerate(matches[:10])])
-                    embed = discord.Embed(
-                        title="Multiple Ships Found",
-                        description=f"Found {len(matches)} matches for '{ship_name}'. Did you mean:\n\n{options}\n\n*Reply with the number of the ship you want.*",
-                        color=discord.Color.gold()
-                    )
-                    await ctx.send(embed=embed)
-                        
-                    def check(m):
-                        return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
-                        
-                    try:
-                        msg = await self.bot.wait_for("message", check=check, timeout=30.0)
-                        choice = int(msg.content) - 1
-                        if 0 <= choice < len(matches) and choice < 10:
-                            ship = matches[choice]
-                        else:
-                            return await ctx.send("Invalid selection.")
-                    except:
-                        return await ctx.send("Selection timed out.")
+                # We can just instantiate the view temporarily to use its builder, or better yet, make the builder static/standalone.
+                # But for now, let's keep the inline logic consistent with the View's logic.
+                
+                s_name = ship.get("name", "Unknown Ship")
+                s_desc = ship.get("description", "No description available.")
+                s_focus = ship.get("focus", "N/A")
+                s_size = ship.get("sizeLabel", "N/A")
+                
+                min_crew = ship.get("minCrew", "?")
+                max_crew = ship.get("maxCrew", "?")
+                s_crew = f"{min_crew} - {max_crew}" if min_crew != max_crew else str(min_crew)
 
-                    # Fetch detailed info (though search result is usually detailed enough from FleetYards)
-                    embed = discord.Embed(
-                        title=ship.get("name"),
-                        url=f"https://fleetyards.net/ships/{ship.get('slug')}",
-                        description=ship.get("description", "No description available.")[:500] + "...",
-                        color=discord.Color.dark_grey()
-                    )
+                s_price = ship.get("priceLabel", "Not available in-game")
+                s_pledge = ship.get("pledgePriceLabel", "N/A")
+                
+                # Images - Safely drill down
+                media = ship.get("media", {})
+                store_img = media.get("storeImage")
+                
+                img_main = None
+                if isinstance(store_img, dict):
+                    img_main = store_img.get("large") or store_img.get("medium") or store_img.get("source")
+                elif isinstance(store_img, str):
+                    img_main = store_img
+
+                embed = discord.Embed(title=s_name, description=s_desc[:2048], color=discord.Color.dark_red())
+                if img_main:
+                    embed.set_image(url=img_main)
+                
+                manufacturer = ship.get("manufacturer", {}).get("name", "Unknown")
+                
+                embed.add_field(name="Manufacturer", value=manufacturer, inline=True)
+                embed.add_field(name="Focus", value=s_focus, inline=True)
+                embed.add_field(name="Size", value=s_size, inline=True)
+                embed.add_field(name="Crew", value=s_crew, inline=True)
+                embed.add_field(name="Price (aUEC)", value=str(s_price), inline=True)
+                embed.add_field(name="Pledge", value=str(s_pledge), inline=True)
+                
+                slug = ship.get("slug")
+                if slug:
+                    embed.add_field(name="FleetYards Link", value=f"https://fleetyards.net/ships/{slug}", inline=False)
                     
-                    # Store media (Images)
-                    media = ship.get("media")
-                    if media and isinstance(media, list):
-                        # Try to find a store image or generic image
-                        store_img = next((img for img in media if isinstance(img, dict) and img.get("type") == "store_small"), None)
-                        if store_img:
-                            embed.set_thumbnail(url=store_img.get("href"))
-                        
-                        # Use a large image for the main embed
-                        large_img = next((img for img in media if isinstance(img, dict) and (img.get("type") == "store_large" or img.get("type") == "sketchfab")), None)
-                        if large_img:
-                            embed.set_image(url=large_img.get("href"))
-                    elif ship.get("storeImage"):
-                         # Fallback if media array structure differs
-                         embed.set_thumbnail(url=ship.get("storeImage"))
-
-                    # Basic Stats
-                    manufacturer = ship.get("manufacturer")
-                    if isinstance(manufacturer, dict):
-                        man_name = manufacturer.get("name", "Unknown")
-                    else:
-                        man_name = str(manufacturer) if manufacturer else "Unknown"
-                        
-                    embed.add_field(name="Manufacturer", value=man_name, inline=True)
-                    embed.add_field(name="Focus", value=ship.get("focus", "N/A"), inline=True)
-                    embed.add_field(name="Size", value=ship.get("size", "N/A"), inline=True)
-                    
-                    # Technical Stats
-                    embed.add_field(name="Crew", value=f"{ship.get('minCrew', '?')} - {ship.get('maxCrew', '?')}", inline=True)
-                    embed.add_field(name="SCM Speed", value=f"{ship.get('scmSpeed', 'N/A')} m/s", inline=True)
-                    embed.add_field(name="Cargo", value=f"{ship.get('cargo', 0)} SCU", inline=True)
-                    
-                    price_val = ship.get("price")
-                    buy_price = 0
-                    if isinstance(price_val, dict):
-                        buy_price = price_val.get("buy", 0)
-                    elif isinstance(price_val, (int, float)):
-                        buy_price = price_val
-
-                    if buy_price:
-                         embed.add_field(name="aUEC Price", value=f"{buy_price:,.0f} aUEC", inline=True)
-
-                    await ctx.send(embed=embed)
+                await ctx.send(embed=embed)
 
             except Exception as e:
-                await ctx.send(f"Failed to query FleetYards: {e}")
+                await ctx.send(f"An error occurred while fetching ship data: {e}")
 
     @sc_base.command(name="status")
     async def sc_status(self, ctx):
