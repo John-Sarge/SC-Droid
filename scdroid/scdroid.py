@@ -131,6 +131,8 @@ class SCDroid(commands.Cog):
         if not api_key:
             return await ctx.send("The API key has not been set by the bot owner yet. Use `[p]sc setkey`.")
             
+        # Ensure SID is uppercase as the API is strictly case-sensitive for IDs
+        sid = sid.upper()
         url = f"https://api.starcitizen-api.com/{api_key}/v1/auto/organization/{sid}"
         
         async with ctx.typing():
@@ -139,12 +141,20 @@ class SCDroid(commands.Cog):
                     if response.status == 200:
                         data = await response.json()
                         if data.get("success") == 1:
-                            org = data["data"]
+                            org = data.get("data")
+                            
+                            if not org:
+                                return await ctx.send(f"Organization '{sid}' data is missing/empty.")
+
+                            # Handle complex headline object (html/plaintext)
+                            headline = org.get('headline', '')
+                            if isinstance(headline, dict):
+                                headline = headline.get('plaintext', '')
                             
                             embed = discord.Embed(
                                 title=f"{org.get('name')} [{org.get('sid')}]",
                                 url=org.get('url', ''),
-                                description=org.get('headline', ''),
+                                description=headline[:2000] if headline else '',
                                 color=discord.Color.brand_red()
                             )
                             embed.set_thumbnail(url=org.get('logo', ''))
