@@ -149,27 +149,27 @@ class SCDroid(commands.Cog):
         fleet = await self.config.user(ctx.author).fleet()
         if not fleet:
             return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
-            
-        ship_counts = {}
+        
+        # Calculate ship counts
+        total_ships = len(fleet)
+        
+        # Manufacturer breakdown
+        manufacturers = {}
         for ship in fleet:
-            name = ship.get("name") or ship.get("type") or "Unknown Ship"
-            ship_counts[name] = ship_counts.get(name, 0) + 1
+            man = ship.get("manufacturerName", "Unknown")
+            manufacturers[man] = manufacturers.get(man, 0) + 1
             
-        # Sort by most numerous ships first
-        sorted_counts = sorted(ship_counts.items(), key=lambda x: x[1], reverse=True)
+        sorted_man = sorted(manufacturers.items(), key=lambda x: x[1], reverse=True)
         
-        description = f"**Total Ships:** {len(fleet)}\n\n"
+        embed = discord.Embed(title=f"{ctx.author.display_name}'s Fleet Summary", color=discord.Color.blue())
         
-        # Display top 10 most common ships or all if small fleet
-        for name, count in sorted_counts[:15]:
-            description += f"**{count}x** {name}\n"
-            
-        if len(sorted_counts) > 15:
-            description += f"\n*...and {len(sorted_counts) - 15} other variants.*"
-            
-        description += "\n\nUse `[p]sc myfleet list` to see individual ships."
+        embed.description = (
+            f"**Total:**\n{total_ships} ships\n\n"
+            f"**Manufacturer Focus:**\n" + 
+            "\n".join([f"{man}: {count} ships" for man, count in sorted_man[:3]])
+        )
         
-        embed = discord.Embed(title=f"{ctx.author.display_name}'s Fleet Summary", description=description, color=discord.Color.blue())
+        embed.set_footer(text="Use `[p]sc myfleet list` to see individual ships.")
         await ctx.send(embed=embed)
 
     @sc_myfleet.command(name="list")
