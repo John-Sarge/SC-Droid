@@ -318,7 +318,7 @@ class SCDroid(commands.Cog):
         """Set the channel for automated RSI updates (Comm-Links)."""
         channel = channel or ctx.channel
         await self.config.guild(ctx.guild).tracked_channel.set(channel.id)
-        await ctx.send(f"RSI website tracking has been enabled. Comm-Link updates will be posted in {channel.mention}.\nUse `[p]sc track options` to enable Roadmap or Dev Tracker alerts.")
+        await ctx.send(f"RSI website tracking has been enabled. Comm-Link updates will be posted in {channel.mention}.\nUse `[p]sc trackopts` to enable Roadmap or Dev Tracker alerts.")
 
     @sc_base.group(name="trackopts")
     @commands.has_permissions(manage_channels=True)
@@ -356,6 +356,10 @@ class SCDroid(commands.Cog):
         
         for feed_type, feed_url, config_last_id, guild_config_key in feeds:
             try:
+                # Ensure we have a session to use
+                if self.session.closed:
+                    self.session = aiohttp.ClientSession()
+
                 async with self.session.get(feed_url) as response:
                     if response.status != 200:
                         continue
@@ -402,7 +406,8 @@ class SCDroid(commands.Cog):
                                     guild = self.bot.get_guild(guild_id)
                                     if guild:
                                         channel = guild.get_channel(channel_id)
-                                        if channel:
+                                        # Only send if the channel exists and we have permissions
+                                        if channel and channel.permissions_for(guild.me).send_messages:
                                             await channel.send(embed=embed)
             except Exception as e:
                 self.bot.logger.error(f"RSI Scraper Loop Exception ({feed_type}): {e}")
