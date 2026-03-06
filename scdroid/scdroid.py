@@ -84,9 +84,10 @@ class SCDroid(commands.Cog):
         if not ctx.message.attachments:
             return await ctx.send("Please attach your exported JSON file to the command message.")
             
-        attachment = ctx.message.attachments
-        if not attachment.filename.endswith('.json'):
-            return await ctx.send("The attached file must be a.json file.")
+        attachment = ctx.message.attachments[0]
+        
+        if not attachment.filename.lower().endswith('.json'):
+            return await ctx.send("The attached file must be a .json file.")
             
         try:
             file_bytes = await attachment.read()
@@ -95,7 +96,12 @@ class SCDroid(commands.Cog):
             # Simple validation to ensure it's a list format before saving
             if isinstance(fleet_data, list):
                 await self.config.user(ctx.author).fleet.set(fleet_data)
-                await ctx.send(f"Successfully imported {len(fleet_data)} ships into your personal database!")
+                
+                # Report stats
+                count = len(fleet_data)
+                manufacturers = set(s.get("manufacturerCode", "Unknown") for s in fleet_data if isinstance(s, dict))
+                
+                await ctx.send(f"Successfully imported {count} ships from {len(manufacturers)} manufacturers into your personal database!")
             else:
                 await ctx.send("Invalid JSON format. Expected a list structure.")
         except json.JSONDecodeError:
@@ -108,18 +114,148 @@ class SCDroid(commands.Cog):
         if not fleet:
             return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
             
-        # Parse the JSON layout; usually contains 'name', 'type', or 'ship' keys
-        ship_names = [ship.get("name") or ship.get("type") or str(ship) for ship in fleet[:10]]
+        display_lines = []
+        # Sort by name for cleaner display
+        sorted_fleet = sorted(fleet, key=lambda x: x.get("name", ""))
+        
+        for ship in sorted_fleet[:15]:
+            # Handle different JSON formats (FleetYards vs Hangar XPLORer)
+            name = ship.get("name") or ship.get("type") or "Unknown Ship"
+            custom_name = ship.get("shipName")
+            
+            if custom_name:
+                display_lines.append(f"**{custom_name}** ({name})")
+            else:
+                display_lines.append(name)
         
         embed = discord.Embed(title=f"{ctx.author.display_name}'s Hangar", color=discord.Color.green())
-        embed.description = "\n".join(ship_names)
+        embed.description = "\n".join(display_lines)
         
-        if len(fleet) > 10:
-            embed.set_footer(text=f"...and {len(fleet) - 10} more ships.")
+        if len(sorted_fleet) > 15:
+            embed.set_footer(text=f"...and {len(sorted_fleet) - 15} more ships.")
         else:
-            embed.set_footer(text=f"Total ships: {len(fleet)}")
+            embed.set_footer(text=f"Total ships: {len(sorted_fleet)}")
             
         await ctx.send(embed=embed)
+
+    @sc_base.command(name="find")
+    async def sc_find(self, ctx, *, query: str):
+        """Search for a ship in your personal fleet."""
+        fleet = await self.config.user(ctx.author).fleet()
+        if not fleet:
+            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
+            
+        query = query.lower()
+        matches = []
+        for ship in fleet:
+            # Check safely for name, shipName, and manufacturer
+            name = (ship.get("name") or "").lower()
+            custom_name = (ship.get("shipName") or "").lower()
+            manufacturer = (ship.get("manufacturerName") or "").lower()
+            
+            if query in name or query in custom_name or query in manufacturer:
+                matches.append(ship)
+        
+        if not matches:
+            return await ctx.send(f"No ships found matching '{query}'.")
+            
+        embed = discord.Embed(title=f"Fleet Search: {query}", color=discord.Color.blue())
+        
+        for ship in matches[:10]:
+            name = ship.get("name", "Unknown")
+            custom_name = ship.get("shipName")
+            manufacturer = ship.get("manufacturerCode", "Unknown")
+            slug = ship.get("slug")
+            
+            display_title = f"{name} - '{custom_name}'" if custom_name else name
+            
+            details = f"**Manufacturer:** {manufacturer}"
+            if slug:
+                details += f"\n[View on FleetYards](https://fleetyards.net/ships/{slug})"
+            
+            embed.add_field(name=display_title, value=details, inline=False)
+            
+        if len(matches) > 10:
+            embed.set_footer(text=f"Showing top 10 of {len(matches)} matches.")
+            
+        await ctx.send(embed=embed)
+
+    @sc_base.command(name="status")
+    async def sc_status(self, ctx):
+        """Check the current status of the Persistent Universe."""
+        url = "https://status.robertsspaceindustries.com/api/5.0/incidents.json"
+        
+        async with ctx.typing():
+            try:
+                async with self.session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        incidents = data.get("incidents", [])
+                        
+                        if not incidents:
+                            await ctx.send("No active incidents reported. All systems operational.")
+                            return
+                        
+                        embed = discord.Embed(title="RSI Platform Status", url="https://status.robertsspaceindustries.com/", color=discord.Color.orange())
+                        
+                        for incident in incidents[:3]: # Show top 3 recent incidents
+                            title = incident.get("title", "Unknown Incident")
+                            impact = incident.get("impact", "Unknown")
+                            status = incident.get("status", "Unknown")
+                            id = incident.get("id")
+                            
+                            value_text = f"**Impact:** {impact}\n**Status:** {status}"
+                            if id:
+                                value_text += f"\n[More Info](https://status.robertsspaceindustries.com/incidents/{id})"
+                            
+                            embed.add_field(
+                                name=title,
+                                value=value_text,
+                                inline=False
+                            )
+                        
+                        if len(incidents) > 3:
+                            embed.set_footer(text=f"And {len(incidents) - 3} more active incidents.")
+                            
+                        await ctx.send(embed=embed)
+                    else:
+                        await ctx.send("Could not retrieve status from RSI.")
+            except Exception as e:
+                await ctx.send(f"Failed to reach RSI Status Page: {e}")
+
+    @sc_base.command(name="news")
+    async def sc_news(self, ctx):
+        """Manually fetch the latest RSI Comm-Link post."""
+        feed_url = "https://leonick.se/feeds/rsi/atom"
+        
+        async with ctx.typing():
+            try:
+                async with self.session.get(feed_url) as response:
+                    if response.status != 200:
+                        return await ctx.send("Could not fetch RSI news feed.")
+                    
+                    xml_data = await response.text()
+                    root = ET.fromstring(xml_data)
+                    ns = {'atom': 'http://www.w3.org/2005/Atom'}
+                    
+                    latest_entry = root.find('atom:entry', ns)
+                    if latest_entry is None:
+                        return await ctx.send("No news found.")
+                        
+                    title = latest_entry.find('atom:title', ns).text
+                    link = latest_entry.find('atom:link', ns).attrib['href']
+                    updated = latest_entry.find('atom:updated', ns).text
+                    
+                    embed = discord.Embed(
+                        title="Latest RSI Comm-Link",
+                        description=f"**[{title}]({link})**",
+                        color=discord.Color.gold()
+                    )
+                    embed.set_footer(text=f"Published: {updated}")
+                    
+                    await ctx.send(embed=embed)
+            except Exception as e:
+                await ctx.send(f"Error fetching news: {e}")
 
     @sc_base.command(name="track")
     @commands.has_permissions(manage_channels=True)
