@@ -114,29 +114,29 @@ class SCDroid(commands.Cog):
         if not fleet:
             return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
             
-        display_lines = []
         # Sort by name for cleaner display
         sorted_fleet = sorted(fleet, key=lambda x: x.get("name", ""))
         
-        for ship in sorted_fleet[:15]:
-            # Handle different JSON formats (FleetYards vs Hangar XPLORer)
-            name = ship.get("name") or ship.get("type") or "Unknown Ship"
-            custom_name = ship.get("shipName")
-            
-            if custom_name:
-                display_lines.append(f"**{custom_name}** ({name})")
-            else:
-                display_lines.append(name)
+        chunk_size = 15
+        chunks = [sorted_fleet[i:i + chunk_size] for i in range(0, len(sorted_fleet), chunk_size)]
         
-        embed = discord.Embed(title=f"{ctx.author.display_name}'s Hangar", color=discord.Color.green())
-        embed.description = "\n".join(display_lines)
-        
-        if len(sorted_fleet) > 15:
-            embed.set_footer(text=f"...and {len(sorted_fleet) - 15} more ships.")
-        else:
-            embed.set_footer(text=f"Total ships: {len(sorted_fleet)}")
+        for i, chunk in enumerate(chunks):
+            display_lines = []
+            for ship in chunk:
+                # Handle different JSON formats (FleetYards vs Hangar XPLORer)
+                name = ship.get("name") or ship.get("type") or "Unknown Ship"
+                custom_name = ship.get("shipName")
+                
+                if custom_name:
+                    display_lines.append(f"**{custom_name}** ({name})")
+                else:
+                    display_lines.append(name)
             
-        await ctx.send(embed=embed)
+            embed = discord.Embed(title=f"{ctx.author.display_name}'s Hangar", color=discord.Color.green())
+            embed.description = "\n".join(display_lines)
+            embed.set_footer(text=f"Page {i+1} of {len(chunks)} | Total ships: {len(sorted_fleet)}")
+            
+            await ctx.send(embed=embed)
 
     @sc_base.command(name="find")
     async def sc_find(self, ctx, *, query: str):
