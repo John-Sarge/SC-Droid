@@ -5,6 +5,39 @@ import xml.etree.ElementTree as ET
 from redbot.core import commands, Config
 from discord.ext import tasks
 
+class FleetPaginationView(discord.ui.View):
+    def __init__(self, pages, author, timeout=60):
+        super().__init__(timeout=timeout)
+        self.pages = pages
+        self.author = author
+        self.current_page = 0
+        
+        # Initial button state
+        self.children[0].disabled = True  # Previous button starts disabled
+        self.children[1].disabled = len(pages) <= 1  # Next button disabled if only 1 page
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user != self.author:
+            await interaction.response.send_message("Only the command sender can control this menu.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    def update_buttons(self):
+        self.children[0].disabled = self.current_page == 0
+        self.children[1].disabled = self.current_page == len(self.pages) - 1
+
 class SCDroid(commands.Cog):
     """Advanced Star Citizen integration for API telemetry and fleet management."""
 
@@ -117,6 +150,7 @@ class SCDroid(commands.Cog):
         # Sort by name for cleaner display
         sorted_fleet = sorted(fleet, key=lambda x: x.get("name", ""))
         
+        pages = []
         chunk_size = 15
         chunks = [sorted_fleet[i:i + chunk_size] for i in range(0, len(sorted_fleet), chunk_size)]
         
@@ -135,8 +169,13 @@ class SCDroid(commands.Cog):
             embed = discord.Embed(title=f"{ctx.author.display_name}'s Hangar", color=discord.Color.green())
             embed.description = "\n".join(display_lines)
             embed.set_footer(text=f"Page {i+1} of {len(chunks)} | Total ships: {len(sorted_fleet)}")
-            
-            await ctx.send(embed=embed)
+            pages.append(embed)
+
+        if len(pages) > 0:
+            view = FleetPaginationView(pages, ctx.author)
+            await ctx.send(embed=pages[0], view=view)
+        else:
+             await ctx.send("No ships found.")
 
     @sc_base.command(name="find")
     async def sc_find(self, ctx, *, query: str):
