@@ -154,7 +154,7 @@ class SCDroid(commands.Cog):
         """Retrieve a Star Citizen user profile."""
         api_key = await self.config.sc_api_key()
         if not api_key:
-            return await ctx.send("The API key has not been set by the bot owner yet. Use `[p]sc setkey`.")
+            return await ctx.send(f"The API key has not been set by the bot owner yet. Use `{ctx.clean_prefix}sc setkey`.")
             
         # Using the 'auto' endpoint fallback mode to preserve daily live tokens
         url = f"https://api.starcitizen-api.com/{api_key}/v1/auto/user/{handle}"
@@ -222,7 +222,7 @@ class SCDroid(commands.Cog):
         """View a summary of your imported fleet."""
         fleet = await self.config.user(ctx.author).fleet()
         if not fleet:
-            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
+            return await ctx.send(f"Your hangar is empty! Use `{ctx.clean_prefix}sc importfleet` to upload your JSON file.")
         
         # Calculate ship counts
         total_ships = len(fleet)
@@ -243,7 +243,7 @@ class SCDroid(commands.Cog):
             "\n".join([f"{man}: {count} ships" for man, count in sorted_man[:3]])
         )
         
-        embed.set_footer(text="Use `[p]sc myfleet list` to see individual ships.")
+        embed.set_footer(text=f"Use `{ctx.clean_prefix}sc myfleet list` to see individual ships.")
         await ctx.send(embed=embed)
 
     @sc_myfleet.command(name="list")
@@ -251,7 +251,7 @@ class SCDroid(commands.Cog):
         """List all individual ships in your fleet with pagination."""
         fleet = await self.config.user(ctx.author).fleet()
         if not fleet:
-            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
+            return await ctx.send(f"Your hangar is empty! Use `{ctx.clean_prefix}sc importfleet` to upload your JSON file.")
             
         # Sort by name for cleaner display
         sorted_fleet = sorted(fleet, key=lambda x: x.get("name", ""))
@@ -288,7 +288,7 @@ class SCDroid(commands.Cog):
         """Search for a ship in your personal fleet."""
         fleet = await self.config.user(ctx.author).fleet()
         if not fleet:
-            return await ctx.send("Your hangar is empty! Use `[p]sc importfleet` to upload your JSON file.")
+            return await ctx.send(f"Your hangar is empty! Use `{ctx.clean_prefix}sc importfleet` to upload your JSON file.")
             
         query = query.lower()
         matches = []
@@ -768,7 +768,7 @@ class SCDroid(commands.Cog):
     async def sc_compare(self, ctx, *, query: str):
         """Compare two ships side-by-side. Usage: `[p]sc compare <ship1> vs <ship2>`"""
         if " vs " not in query.lower():
-             return await ctx.send("Please separate ship names with ' vs '. Example: `[p]sc compare titan vs cutlass`")
+             return await ctx.send(f"Please separate ship names with ' vs '. Example: `{ctx.clean_prefix}sc compare titan vs cutlass`")
         
         ship1_query, ship2_query = query.split(" vs " if " vs " in query else " VS ", 1)
         
