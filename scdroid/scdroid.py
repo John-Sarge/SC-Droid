@@ -772,28 +772,49 @@ class SCDroid(commands.Cog):
         
         ship1_query, ship2_query = query.split(" vs " if " vs " in query else " VS ", 1)
         
-        # Helper to find a ship
-        async def find_ship(query):
+        # Helper to find/select a ship
+        async def get_ship(query):
             params = query.lower().split()
             matches = []
             for ship in self.ship_cache:
                 name = (ship.get("name") or "").lower()
-                if all(word in name for word in params) or query.lower() == name:
+                manufacturer = (ship.get("manufacturer", {}).get("name") or "").lower()
+                
+                # Match logic
+                if all(word in name for word in params) or \
+                   all(word in manufacturer for word in params) or \
+                   query.lower() == name:
                     matches.append(ship)
-                    
+            
             if not matches:
+                await ctx.send(f"No ships found matching '{query}'.")
                 return None
                 
             matches.sort(key=lambda x: (x.get("name", "").lower() != query.lower(), len(x.get("name", ""))))
-            return matches[0] # Return best match for simplicity in this command
             
-        ship1 = await find_ship(ship1_query)
-        ship2 = await find_ship(ship2_query)
+            if len(matches) > 1:
+                view = ShipSelectView(matches, ctx.author)
+                msg = await ctx.send(f"Multiple ships found for '**{query}**'. Please select one:", view=view)
+                
+                if await view.wait():
+                    await ctx.send("Selection timed out.")
+                    return None
+                
+                selected_slug = view.selected_ship
+                selected_ship = next((s for s in self.ship_cache if s.get("slug") == selected_slug or s.get("name") == selected_slug), None)
+                try:
+                    await msg.delete()
+                except:
+                    pass
+                return selected_ship
+            else:
+                return matches[0]
+
+        ship1 = await get_ship(ship1_query.strip())
+        if not ship1: return
         
-        if not ship1:
-            return await ctx.send(f"Could not find ship: {ship1_query}")
-        if not ship2:
-            return await ctx.send(f"Could not find ship: {ship2_query}")
+        ship2 = await get_ship(ship2_query.strip())
+        if not ship2: return
             
         # Build Comparison Embed
         embed = discord.Embed(
@@ -802,39 +823,79 @@ class SCDroid(commands.Cog):
         )
         
         # Format: Field Name | Ship 1 Value | Ship 2 Value
-        # Using a helper for cleaner formatting
-        def compare_val(field, label, suffix=""):
-            v1 = ship1.get(field, "N/A")
-            v2 = ship2.get(field, "N/A")
+        def compare_val(field, label, suffix="", reverse=False):
+            v1 = ship1.get(field)
+            v2 = ship2.get(field)
             
-            # Add arrows for numeric comparisons
-            try:
-                # Basic sanitation for numbers (stripping $, commas)
-                n1 = float(str(v1).replace('$', '').replace(',', ''))
-                n2 = float(str(v2).replace('$', '').replace(',', ''))
-                
-                if n1 > n2:
-                    v1 = f"**{v1}** 🔼"
-                elif n2 > n1:
-                    v2 = f"**{v2}** 🔼"
-            except:
-                pass # Not numbers, ignore
-                
-            embed.add_field(name=f"{label} (1)", value=f"{v1}{suffix}", inline=True)
-            embed.add_field(name=f"{label} (2)", value=f"{v2}{suffix}", inline=True)
-            embed.add_field(name="\u200b", value="\u200b", inline=True) # Spacer
+            val1_str = "N/A"
+            val2_str = "N/A"
+
+            # Parse numbers
+            n1 = None
+            n2 = None
             
-        embed.set_thumbnail(url=ship1.get("storeImage") or ship1.get("image") or "")
+            if v1 is not None:
+                try:
+                    n1 = float(str(v1).replace('$', '').replace(',', ''))
+                    # Format number nicely
+                    if n1.is_integer():
+                         val1_str = f"{int(n1):,}"
+                    else:
+                         val1_str = f"{n1:,.2f}"
+                except:
+                    val1_str = str(v1)
+
+            if v2 is not None:
+                try:
+                    n2 = float(str(v2).replace('$', '').replace(',', ''))
+                     # Format number nicely
+                    if n2.is_integer():
+                         val2_str = f"{int(n2):,}"
+                    else:
+                         val2_str = f"{n2:,.2f}"
+                except:
+                     val2_str = str(v2)
+
+            # Compare if both are numbers
+            if n1 is not None and n2 is not None:
+                if n1 != n2:
+                    # Determine winner
+                    # If reverse is True (e.g. Price), lower is better
+                    v1_better = False
+                    if reverse:
+                         if n1 < n2: v1_better = True
+                    else:
+                         if n1 > n2: v1_better = True
+                    
+                    if v1_better:
+                        val1_str = f"**{val1_str}** 🔼"
+                    else:
+                        val2_str = f"**{val2_str}** 🔼"
+
+            embed.add_field(name=f"{label} (1)", value=f"{val1_str}{suffix}", inline=True)
+            embed.add_field(name=f"{label} (2)", value=f"{val2_str}{suffix}", inline=True)
+            embed.add_field(name="\u200b", value="\u200b", inline=True) 
+            
+        # Images
+        # Ship 1 as Thumbnail
+        img1 = ship1.get("storeImage") or ship1.get("image")
+        if img1:
+            embed.set_thumbnail(url=img1)
+            
+        # Ship 2 as Main Image
+        img2 = ship2.get("storeImage") or ship2.get("image")
+        if img2:
+            embed.set_image(url=img2)
         
         embed.add_field(name="Ship 1", value=ship1['name'], inline=True)
         embed.add_field(name="Ship 2", value=ship2['name'], inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
-        compare_val("price", "Price")
+        compare_val("price", "Price", " UEC", reverse=True) # Lower price is better
         compare_val("scmSpeed", "SCM Speed", " m/s")
         compare_val("maxCrew", "Max Crew")
         compare_val("cargo", "Cargo", " SCU")
         compare_val("length", "Length", " m")
-        compare_val("mass", "Mass", " kg")
+        compare_val("mass", "Mass", " kg") 
         
         await ctx.send(embed=embed)
