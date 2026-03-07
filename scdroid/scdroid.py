@@ -102,7 +102,7 @@ class SCDroid(commands.Cog):
         
         # Define schemas based on scope
         self.config.register_global(sc_api_key=None, last_comm_link_id=None, last_roadmap_update=None)
-        self.config.register_guild(tracked_channel=None)
+        self.config.register_guild(tracked_channel=None, allowed_role=None)
         self.config.register_user(fleet=None)
         
         self.session = aiohttp.ClientSession()
@@ -165,6 +165,30 @@ class SCDroid(commands.Cog):
         """Set your starcitizen-api.com API key (Bot Owner Only)."""
         await self.config.sc_api_key.set(key)
         await ctx.send("Star Citizen API key has been successfully configured.")
+
+    @sc_base.command(name="setrole")
+    @commands.has_permissions(administrator=True)
+    async def sc_setrole(self, ctx, role: discord.Role = None):
+        """Set a role that is allowed to use admin-level SC commands (Track, Webhook)."""
+        if role:
+            await self.config.guild(ctx.guild).allowed_role.set(role.id)
+            await ctx.send(f"Success! Users with the **{role.name}** role can now use sensitive SC commands.")
+        else:
+            await self.config.guild(ctx.guild).allowed_role.set(None)
+            await ctx.send("Admin role restriction removed. Only Administrators can use these commands now.")
+
+    async def check_sc_permissions(self, ctx):
+        """Helper to check if user has Admin or the configured allowed role."""
+        if await self.bot.is_owner(ctx.author) or ctx.author.guild_permissions.administrator:
+            return True
+            
+        allowed_role_id = await self.config.guild(ctx.guild).allowed_role()
+        if allowed_role_id:
+            role = ctx.guild.get_role(allowed_role_id)
+            if role and role in ctx.author.roles:
+                return True
+                
+        return False
 
     @sc_base.command(name="user")
     async def sc_user(self, ctx, handle: str):
@@ -669,9 +693,11 @@ class SCDroid(commands.Cog):
         await ctx.send(f"Done. Cache now contains {len(self.ship_cache)} ships.")
 
     @sc_base.command(name="track")
-    @commands.has_permissions(manage_channels=True)
     async def sc_track(self, ctx, channel: discord.TextChannel = None):
         """Set the channel for automated RSI Comm-Link updates."""
+        if not await self.check_sc_permissions(ctx):
+             return await ctx.send("You do not have the required role or permissions to use this command.")
+
         channel = channel or ctx.channel
         await self.config.guild(ctx.guild).tracked_channel.set(channel.id)
         await ctx.send(f"RSI website tracking has been enabled. Updates will be posted in {channel.mention}.")
@@ -914,3 +940,24 @@ class SCDroid(commands.Cog):
         compare_val("mass", "Mass", " kg", reverse=True) 
         
         await ctx.send(embed=embed)
+
+    @sc_base.command(name="createwebhook")
+    async def sc_createwebhook(self, ctx, name: str = "SCDroid Feed"):
+        """Create a webhook in this channel and DM the URL to the user."""
+        if not await self.check_sc_permissions(ctx):
+             return await ctx.send("You do not have the required role or permissions to use this command.")
+
+        try:
+            webhook = await ctx.channel.create_webhook(name=name, reason=f"Requested by {ctx.author}")
+            
+            try:
+                await ctx.author.send(f"**Webhook Created!**\n\nChannel: {ctx.channel.mention}\nName: {name}\nURL: ||{webhook.url}||")
+                await ctx.send(f"Webhook '{name}' created via DM.")
+            except discord.Forbidden:
+                await ctx.send("Webhook created, but I couldn't DM you the URL. Please enable DMs.")
+                await webhook.delete() # Safety cleanup
+                
+        except discord.Forbidden:
+            await ctx.send("I do not have permission to Manage Webhooks in this channel.")
+        except Exception as e:
+            await ctx.send(f"Failed to create webhook: {e}")
