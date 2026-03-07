@@ -540,43 +540,64 @@ class SCDroid(commands.Cog):
     @sc_base.command(name="status")
     async def sc_status(self, ctx):
         """Check the current status of the Persistent Universe."""
-        url = "https://status.robertsspaceindustries.com/api/5.0/incidents.json"
+        # Using the main status page HTML since the API endpoint (api/5.0/incidents.json)
+        # is now protected by 403 Forbidden (likely Cloudflare or WAF).
+        url = "https://status.robertsspaceindustries.com/"
         
         async with ctx.typing():
             try:
-                async with self.session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        incidents = data.get("incidents", [])
+                # Set a User-Agent to mimic a browser, though simple scraping might still be blocked eventually.
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                async with self.session.get(url, headers=headers) as response:
+                    # If direct simple request fails, fail gracefully
+                    if response.status != 200:
+                        return await ctx.send(f"Could not retrieve status from RSI (HTTP {response.status}).")
+                    
+                    html_content = await response.text()
+                    
+                    # Simple parsing to check for the global status indicator
+                    # The HTML contains <div class="summary" data-status="operational">
+                    
+                    status_text = "Unknown"
+                    color = discord.Color.greyple()
+                    
+                    if 'data-status="operational"' in html_content:
+                        status_text = "Operational"
+                        color = discord.Color.green()
+                    elif 'data-status="maintenance"' in html_content:
+                        status_text = "Maintenance"
+                        color = discord.Color.orange()
+                    elif 'data-status="degraded"' in html_content:
+                        status_text = "Degraded Performance"
+                        color = discord.Color.gold()
+                    elif 'data-status="major"' in html_content:
+                        status_text = "Major Outage"
+                        color = discord.Color.red()
                         
-                        if not incidents:
-                            await ctx.send("No active incidents reported. All systems operational.")
-                            return
+                    embed = discord.Embed(
+                        title="RSI Platform Status", 
+                        url=url, 
+                        color=color,
+                        description=f"**Current Global Status:** {status_text}"
+                    )
+                    
+                    # Attempt to extract recent incidents title if possible
+                    # This is brittle with regex but better than nothing without BeautifulSoup
+                    # <div class="issue__header ">\n<h3>\nLive Services Disruption\n</h3>
+                    try:
+                        import re
+                        # Find the first issue header 
+                        match = re.search(r'<div class="issue__header ">\s*<h3>\s*(.*?)\s*</h3>', html_content, re.DOTALL)
+                        if match:
+                            latest_incident = match.group(1).strip()
+                            embed.add_field(name="Latest Incident", value=latest_incident, inline=False)
+                    except:
+                        pass
                         
-                        embed = discord.Embed(title="RSI Platform Status", url="https://status.robertsspaceindustries.com/", color=discord.Color.orange())
-                        
-                        for incident in incidents[:3]: # Show top 3 recent incidents
-                            title = incident.get("title", "Unknown Incident")
-                            impact = incident.get("impact", "Unknown")
-                            status = incident.get("status", "Unknown")
-                            id = incident.get("id")
-                            
-                            value_text = f"**Impact:** {impact}\n**Status:** {status}"
-                            if id:
-                                value_text += f"\n[More Info](https://status.robertsspaceindustries.com/incidents/{id})"
-                            
-                            embed.add_field(
-                                name=title,
-                                value=value_text,
-                                inline=False
-                            )
-                        
-                        if len(incidents) > 3:
-                            embed.set_footer(text=f"And {len(incidents) - 3} more active incidents.")
-                            
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("Could not retrieve status from RSI.")
+                    await ctx.send(embed=embed)
+
             except Exception as e:
                 await ctx.send(f"Failed to reach RSI Status Page: {e}")
 
