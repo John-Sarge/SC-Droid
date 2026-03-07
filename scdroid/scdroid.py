@@ -1,6 +1,5 @@
 import discord
 import aiohttp
-from aiohttp import web
 import json
 import xml.etree.ElementTree as ET
 from redbot.core import commands, Config
@@ -102,17 +101,11 @@ class SCDroid(commands.Cog):
         self.config = Config.get_conf(self, identifier=847362948573, force_registration=True)
         
         # Define schemas based on scope
-        self.config.register_global(sc_api_key=None, last_comm_link_id=None, last_roadmap_update=None, webhook_port=43210)
-        self.config.register_guild(tracked_channel=None, admin_role=None)
+        self.config.register_global(sc_api_key=None, last_comm_link_id=None, last_roadmap_update=None)
+        self.config.register_guild(tracked_channel=None)
         self.config.register_user(fleet=None)
         
         self.session = aiohttp.ClientSession()
-        
-        # Webhook Server State
-        self.runner = None
-        self.site = None
-        self.bot.loop.create_task(self.start_webhook_server())
-
         self.ship_cache = [] # Cache to store all ships locally
         self.bot.loop.create_task(self.update_ship_cache())
         self.rsi_scraper_loop.start() # Starts the background task for news/status updates
@@ -159,54 +152,6 @@ class SCDroid(commands.Cog):
         self.rsi_scraper_loop.cancel()
         self.roadmap_scraper_loop.cancel()
         self.bot.loop.create_task(self.session.close())
-        
-        if self.site:
-            self.bot.loop.create_task(self.site.stop())
-        if self.runner:
-            self.bot.loop.create_task(self.runner.cleanup())
-
-    async def start_webhook_server(self):
-        """Start a local web server to listen for Tracker SC webhooks."""
-        port = await self.config.webhook_port()
-        app = web.Application()
-        app.router.add_post('/webhook', self.handle_webhook_request)
-        
-        self.runner = web.AppRunner(app)
-        await self.runner.setup()
-        
-        # Listen on all interfaces
-        self.site = web.TCPSite(self.runner, '0.0.0.0', port)
-        
-        try:
-            await self.site.start()
-            self.bot.logger.info(f"SCDroid: Webhook listener started on port {port}")
-        except Exception as e:
-            self.bot.logger.error(f"SCDroid: Failed to start webhook listener: {e}")
-
-    async def handle_webhook_request(self, request):
-        """Handle incoming webhook POST requests from Tracker SC."""
-        try:
-            data = await request.json()
-            
-            # Tracker SC (and Discord Webhooks) usually send an "embeds" array
-            if 'embeds' in data:
-                for embed_data in data['embeds']:
-                    # discord.Embed.from_dict expects the raw dict structure
-                    # We might need to sanitize or ensure it's valid
-                    try:
-                        embed = discord.Embed.from_dict(embed_data)
-                        await self.dispatch_to_tracked_channels(embed)
-                    except Exception as parse_err:
-                        self.bot.logger.error(f"SCDroid: Failed to parse incoming embed: {parse_err}")
-
-            # If it sends plain content
-            if 'content' in data and data['content']:
-                await self.dispatch_to_tracked_channels(data['content'])
-
-            return web.Response(text="Payload received", status=200)
-        except Exception as e:
-            self.bot.logger.error(f"SCDroid: Webhook Handler Error: {e}")
-            return web.Response(text="Internal Error", status=500)
 
     @commands.group(name="sc", invoke_without_command=True)
     async def sc_base(self, ctx):
@@ -220,97 +165,6 @@ class SCDroid(commands.Cog):
         """Set your starcitizen-api.com API key (Bot Owner Only)."""
         await self.config.sc_api_key.set(key)
         await ctx.send("Star Citizen API key has been successfully configured.")
-
-    @sc_base.command(name="setrole")
-    @commands.has_permissions(administrator=True)
-    async def sc_setrole(self, ctx, role: discord.Role = None):
-        """Set a required role for using admin interactions (`sc track`, `sc webhook`)."""
-        if role:
-            await self.config.guild(ctx.guild).admin_role.set(role.id)
-            await ctx.send(f"Restricted access enabled. Access requires role: **{role.name}**")
-        else:
-            await self.config.guild(ctx.guild).admin_role.set(None)
-            await ctx.send("Role restriction disabled. Default permissions (Manage Channels / Owner) apply.")
-
-    async def check_permissions(self, ctx, owner_override=False):
-        """Custom check for role-based access control."""
-        # Clean Override for Bot Owner
-        if await self.bot.is_owner(ctx.author):
-            return True
-            
-        if not ctx.guild:
-            await ctx.send("This command cannot be used in DMs.")
-            return False
-            
-        role_id = await self.config.guild(ctx.guild).admin_role()
-        
-        # If a role IS configured, we enforce strict role access (allowing server admins as fail-safe)
-        if role_id:
-            role = ctx.guild.get_role(role_id)
-            has_role = role and role in ctx.author.roles
-            is_admin = ctx.author.guild_permissions.administrator
-            
-            if has_role or is_admin:
-                return True
-                
-            if role:
-                await ctx.send(f"You require the **{role.name}** role to use this command.")
-            else:
-                await ctx.send("The configured admin role no longer exists.")
-            return False
-            
-        # If NO role is set, fall back to default behavior
-        if owner_override:
-            # For sensitive commands like 'webhook' where default is owner-only
-            await ctx.send("This command is restricted to the bot owner (or a configured role).")
-            return False
-        else:
-            # For standard management commands like 'track'
-            if not ctx.author.guild_permissions.manage_channels:
-                await ctx.send("You need 'Manage Channels' permission (or a configured role).")
-                return False
-                
-        return True
-
-    @sc_base.command(name="webhook")
-    async def sc_webhook(self, ctx):
-        """Get the details for connecting Tracker SC to this bot."""
-        # Defaults to Owner Only unless a role is set
-        if not await self.check_permissions(ctx, owner_override=True):
-            return
-
-        port = await self.config.webhook_port()
-        
-        # Attempt to get public IP (optional context for user)
-        public_ip = "YOUR_PUBLIC_IP"
-        try:
-            async with self.session.get('https://api.ipify.org') as resp:
-                if resp.status == 200:
-                    public_ip = await resp.text()
-        except:
-            pass
-            
-        msg = (
-            f"**SCDroid Webhook Listener**\n"
-            f"Port: `{port}`\n"
-            f"Endpoint Path: `/webhook`\n\n"
-            f"To connect Tracker SC to this bot:\n"
-            f"1. Ensure Port **{port}** is forwarded on your router to this machine.\n"
-            f"2. In Tracker SC, set the Webhook URL to:\n"
-            f"`http://{public_ip}:{port}/webhook`\n\n"
-            f"**Note:** Does not support SSL/HTTPS natively. Ensure your simple webhook source allows HTTP."
-        )
-        await ctx.send(msg)
-
-    @sc_base.command(name="setport")
-    @commands.is_owner()
-    async def sc_setport(self, ctx, port: int):
-        """Change the port used for the webhook listener (Requires Reload)."""
-        if port < 1024 or port > 65535:
-            return await ctx.send("Please select a port between 1024 and 65535.")
-            
-        await self.config.webhook_port.set(port)
-        await ctx.send(f"Webhook port updated to {port}. **Please reload the cog** (`{ctx.clean_prefix}reload scdroid`) for changes to take effect.")
 
     @sc_base.command(name="user")
     async def sc_user(self, ctx, handle: str):
@@ -815,12 +669,9 @@ class SCDroid(commands.Cog):
         await ctx.send(f"Done. Cache now contains {len(self.ship_cache)} ships.")
 
     @sc_base.command(name="track")
+    @commands.has_permissions(manage_channels=True)
     async def sc_track(self, ctx, channel: discord.TextChannel = None):
         """Set the channel for automated RSI Comm-Link updates."""
-        # Defaults to Manage Channels unless a role is set
-        if not await self.check_permissions(ctx):
-            return
-
         channel = channel or ctx.channel
         await self.config.guild(ctx.guild).tracked_channel.set(channel.id)
         await ctx.send(f"RSI website tracking has been enabled. Updates will be posted in {channel.mention}.")
@@ -923,8 +774,8 @@ class SCDroid(commands.Cog):
         except Exception as e:
             self.bot.logger.error(f"Roadmap Scraper Loop Exception: {e}")
 
-    async def dispatch_to_tracked_channels(self, content):
-        """Helper to send updates to all tracked channels. Accepts Embed or Str."""
+    async def dispatch_to_tracked_channels(self, embed):
+        """Helper to send updates to all tracked channels."""
         all_guilds = await self.config.all_guilds()
         for guild_id, data in all_guilds.items():
             channel_id = data.get("tracked_channel")
@@ -934,10 +785,7 @@ class SCDroid(commands.Cog):
                     channel = guild.get_channel(channel_id)
                     if channel:
                         try:
-                            if isinstance(content, discord.Embed):
-                                await channel.send(embed=content)
-                            else:
-                                await channel.send(str(content))
+                            await channel.send(embed=embed)
                         except discord.Forbidden:
                             pass # Bot lost permissions
 
