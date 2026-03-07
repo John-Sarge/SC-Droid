@@ -24,6 +24,7 @@ class FleetPaginationView(discord.ui.View):
         return True
 
     # Defined FIRST so it appears on the LEFT
+    # Allows the user to move to the previous page of the fleet list
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_page = max(0, self.current_page - 1)
@@ -31,6 +32,7 @@ class FleetPaginationView(discord.ui.View):
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
     # Defined SECOND so it appears on the RIGHT
+    # Allows the user to move to the next page of the fleet list
     @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_page = min(len(self.pages) - 1, self.current_page + 1)
@@ -42,6 +44,7 @@ class FleetPaginationView(discord.ui.View):
         self.children[1].disabled = (self.current_page == len(self.pages) - 1)
 
 class ShipSelectView(discord.ui.View):
+    # View containing a dropdown menu for selecting a specific ship from multiple search results
     def __init__(self, ships, author, timeout=60):
         super().__init__(timeout=timeout)
         self.ships = ships
@@ -50,7 +53,7 @@ class ShipSelectView(discord.ui.View):
         
         # Add Select Menu
         options = []
-        for ship in ships[:25]: # Select menus have a 25 option limit
+        for ship in ships[:25]: # Select menus have a 25 option limit, showing top matches
             label = f"{ship.get('name')} ({ship.get('manufacturer', {}).get('code', 'UNK')})"
             slug = ship.get('slug')
             # Fallback for value if slug is missing
@@ -60,17 +63,19 @@ class ShipSelectView(discord.ui.View):
         self.add_item(ShipSelectCallback(options))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Prevents other users from interfering with the ship selection menu
         if interaction.user != self.author:
             await interaction.response.send_message("Only the command sender can select a ship.", ephemeral=True)
             return False
         return True
 
 class ShipSelectCallback(discord.ui.Select):
+    # Callback handler for when a user picks an option in the ShipSelectView dropdown
     def __init__(self, options):
         super().__init__(placeholder="Select a ship...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        # Access the View via self.view
+        # Access the View via self.view to store the selection result
         self.view.selected_ship = self.values[0]
         self.view.stop()
         await interaction.response.defer() # Acknowledge without sending message yet
@@ -91,11 +96,11 @@ class SCDroid(commands.Cog):
         self.session = aiohttp.ClientSession()
         self.ship_cache = [] # Cache to store all ships locally
         self.bot.loop.create_task(self.update_ship_cache())
-        self.rsi_scraper_loop.start()
-        self.roadmap_scraper_loop.start()
+        self.rsi_scraper_loop.start() # Starts the background task for news/status updates
+        self.roadmap_scraper_loop.start() # Starts the background task for roadmap tracking
 
     async def update_ship_cache(self):
-        """Fetch and cache the entire ship list from FleetYards."""
+        """Fetch and cache the entire ship list from FleetYards to enable fast searching and comparisons."""
         url = "https://api.fleetyards.net/v1/models"
         params = {"perPage": 200, "page": 1}
         all_ships = []
@@ -219,7 +224,7 @@ class SCDroid(commands.Cog):
 
     @sc_base.group(name="myfleet", invoke_without_command=True)
     async def sc_myfleet(self, ctx):
-        """View a summary of your imported fleet."""
+        """View a summary of your imported fleet, including manufacturer stats."""
         fleet = await self.config.user(ctx.author).fleet()
         if not fleet:
             return await ctx.send(f"Your hangar is empty! Use `{ctx.clean_prefix}sc importfleet` to upload your JSON file.")
@@ -539,14 +544,14 @@ class SCDroid(commands.Cog):
 
     @sc_base.command(name="status")
     async def sc_status(self, ctx):
-        """Check the current status of the Persistent Universe."""
+        """Check the current status of the Persistent Universe by scraping the RSI Status Page."""
         # Using the main status page HTML since the API endpoint (api/5.0/incidents.json)
-        # is now protected by 403 Forbidden (likely Cloudflare or WAF).
+        # is now protected by 403 Forbidden (Likely Cloudflare WAF protection)
         url = "https://status.robertsspaceindustries.com/"
         
         async with ctx.typing():
             try:
-                # Set a User-Agent to mimic a browser, though simple scraping might still be blocked eventually.
+                # Set a User-Agent to mimic a browser to bypass basic anti-bot checks
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
@@ -653,10 +658,10 @@ class SCDroid(commands.Cog):
 
     @tasks.loop(minutes=10.0)
     async def rsi_scraper_loop(self):
-        """Periodic background loop for RSI website telemetry extraction."""
+        """Periodic background loop checking RSI's Atom feed for new Comm-Links."""
         await self.bot.wait_until_ready() # Ensure WebSocket is ready before scraping
         
-        # Utilizing community Atom feed for resilient tracking against RSI layout changes
+        # Utilizing community Atom feed (leonick.se) for resilient tracking against RSI layout changes
         feed_url = "https://leonick.se/feeds/rsi/atom"
         
         try:
@@ -823,6 +828,7 @@ class SCDroid(commands.Cog):
         )
         
         # Format: Field Name | Ship 1 Value | Ship 2 Value
+        # Updates Logic: Lower values for Price, Crew, Mass, Length are "better" (reverse=True)
         def compare_val(field, label, suffix="", reverse=False):
             v1 = ship1.get(field)
             v2 = ship2.get(field)
@@ -860,7 +866,7 @@ class SCDroid(commands.Cog):
             if n1 is not None and n2 is not None:
                 if n1 != n2:
                     # Determine winner
-                    # If reverse is True (e.g. Price), lower is better
+                    # If reverse is True (e.g. Price, Mass), lower is better
                     v1_better = False
                     if reverse:
                          if n1 < n2: v1_better = True
@@ -874,19 +880,17 @@ class SCDroid(commands.Cog):
 
             embed.add_field(name=f"{label} (1)", value=f"{val1_str}{suffix}", inline=True)
             embed.add_field(name=f"{label} (2)", value=f"{val2_str}{suffix}", inline=True)
-            embed.add_field(name="\u200b", value="\u200b", inline=True) 
-            
-        # Images removed per request since they cannot be symmetrical in a standard Embed
-        
+            embed.add_field(name="\u200b", value="\u200b", inline=True)
+
         embed.add_field(name="Ship 1", value=ship1['name'], inline=True)
         embed.add_field(name="Ship 2", value=ship2['name'], inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         compare_val("price", "Price", " UEC", reverse=True) # Lower price is better
         compare_val("scmSpeed", "SCM Speed", " m/s")
-        compare_val("maxCrew", "Max Crew")
+        compare_val("maxCrew", "Max Crew", reverse=True)
         compare_val("cargo", "Cargo", " SCU")
-        compare_val("length", "Length", " m")
-        compare_val("mass", "Mass", " kg") 
+        compare_val("length", "Length", " m", reverse=True)
+        compare_val("mass", "Mass", " kg", reverse=True) 
         
         await ctx.send(embed=embed)
