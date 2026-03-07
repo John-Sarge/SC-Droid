@@ -41,6 +41,40 @@ class FleetPaginationView(discord.ui.View):
         self.children[0].disabled = (self.current_page == 0)
         self.children[1].disabled = (self.current_page == len(self.pages) - 1)
 
+class ShipSelectView(discord.ui.View):
+    def __init__(self, ships, author, timeout=60):
+        super().__init__(timeout=timeout)
+        self.ships = ships
+        self.author = author
+        self.selected_ship = None
+        
+        # Add Select Menu
+        options = []
+        for ship in ships[:25]: # Select menus have a 25 option limit
+            label = f"{ship.get('name')} ({ship.get('manufacturer', {}).get('code', 'UNK')})"
+            slug = ship.get('slug')
+            # Fallback for value if slug is missing
+            value = slug if slug else ship.get('name')
+            options.append(discord.SelectOption(label=label, value=value))
+            
+        self.add_item(ShipSelectCallback(options))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user != self.author:
+            await interaction.response.send_message("Only the command sender can select a ship.", ephemeral=True)
+            return False
+        return True
+
+class ShipSelectCallback(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="Select a ship...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        # Access the View via self.view
+        self.view.selected_ship = self.values[0]
+        self.view.stop()
+        await interaction.response.defer() # Acknowledge without sending message yet
+
 class SCDroid(commands.Cog):
     """Advanced Star Citizen integration for API telemetry and fleet management."""
 
@@ -50,16 +84,56 @@ class SCDroid(commands.Cog):
         self.config = Config.get_conf(self, identifier=847362948573, force_registration=True)
         
         # Define schemas based on scope
-        self.config.register_global(sc_api_key=None, last_comm_link_id=None)
+        self.config.register_global(sc_api_key=None, last_comm_link_id=None, last_roadmap_update=None)
         self.config.register_guild(tracked_channel=None)
         self.config.register_user(fleet=None)
         
         self.session = aiohttp.ClientSession()
+        self.ship_cache = [] # Cache to store all ships locally
+        self.bot.loop.create_task(self.update_ship_cache())
         self.rsi_scraper_loop.start()
+        self.roadmap_scraper_loop.start()
+
+    async def update_ship_cache(self):
+        """Fetch and cache the entire ship list from FleetYards."""
+        url = "https://api.fleetyards.net/v1/models"
+        params = {"perPage": 200, "page": 1}
+        all_ships = []
+        
+        try:
+            while True:
+                async with self.session.get(url, params=params) as response:
+                    if response.status != 200:
+                        self.bot.logger.error(f"SCDroid: FleetYards API returned {response.status}")
+                        break
+                    
+                    data = await response.json()
+                    
+                    # Safety check: API might return empty list or different format
+                    if not data or not isinstance(data, list):
+                        break
+                        
+                    all_ships.extend(data)
+                    
+                    # If we received fewer items than requested, we've reached the last page
+                    if len(data) < params["perPage"]:
+                        break
+                        
+                    params["page"] += 1
+            
+            if all_ships:
+                self.ship_cache = all_ships
+                self.bot.logger.info(f"SCDroid: Cached {len(self.ship_cache)} ships from FleetYards.")
+            else:
+                self.bot.logger.warning("SCDroid: No ships retrieved from FleetYards.")
+                
+        except Exception as e:
+            self.bot.logger.error(f"Failed to update ship cache: {e}")
 
     def cog_unload(self):
         # Gracefully cancel the background task and close HTTP sockets on unload
         self.rsi_scraper_loop.cancel()
+        self.roadmap_scraper_loop.cancel()
         self.bot.loop.create_task(self.session.close())
 
     @commands.group(name="sc", invoke_without_command=True)
@@ -253,55 +327,78 @@ class SCDroid(commands.Cog):
 
     @sc_base.command(name="ship")
     async def sc_ship(self, ctx, *, ship_name: str):
-        """Search for a ship on FleetYards and display its statistics."""
-        url = "https://api.fleetyards.net/v1/models"
-        params = {"name": ship_name}
+        """Search for a ship (locally cached) and display its statistics."""
+        if not self.ship_cache:
+            await ctx.send("Ship cache is still building... please wait a moment.")
+            await self.update_ship_cache()
+            
+        params = ship_name.lower().split()
+        matches = []
         
-        async with ctx.typing():
+        # Simple fuzzy search against local cache
+        for ship in self.ship_cache:
+            name = (ship.get("name") or "").lower()
+            manufacturer = (ship.get("manufacturer", {}).get("name") or "").lower()
+            code = (ship.get("manufacturer", {}).get("code") or "").lower()
+            
+            # Match if ALL words in query are present in name/manufacturer
+            if all(word in name for word in params) or all(word in manufacturer for word in params) or ship_name.lower() == name:
+                matches.append(ship)
+        
+        if not matches:
+            return await ctx.send(f"No ships found matching '{ship_name}'.")
+
+        # Sort matches by exact name match first, then by string length
+        matches.sort(key=lambda x: (x.get("name", "").lower() != ship_name.lower(), len(x.get("name", ""))))
+        
+        selected_ship = None
+        
+        if len(matches) > 1:
+            view = ShipSelectView(matches, ctx.author)
+            msg = await ctx.send("Multiple ships found. Please select one:", view=view)
+            
+            if await view.wait():
+                return await ctx.send("Selection timed out.")
+            
+            selected_slug = view.selected_ship
+            selected_ship = next((s for s in self.ship_cache if s.get("slug") == selected_slug or s.get("name") == selected_slug), None)
             try:
-                async with self.session.get(url, params=params) as response:
-                    if response.status != 200:
-                        return await ctx.send(f"FleetYards API returned an error: {response.status}")
-                    
-                    data = await response.json()
-                    # FleetYards returns a list or direct object depending on endpoint, usually list for search
-                    if not data:
-                        return await ctx.send(f"No ships found matching '{ship_name}'.")
-                    
-                    # Exact match or first result
-                    ship = data[0] if isinstance(data, list) else data
-                    
-                    embed = discord.Embed(
-                        title=f"{ship.get('name', 'Unknown')} ({ship.get('manufacturer', {}).get('code', 'UNK')})",
-                        url=f"https://fleetyards.net/ships/{ship.get('slug')}",
-                        color=discord.Color.dark_red()
-                    )
-                    
-                    if ship.get("storeImage"):
-                        embed.set_image(url=ship["storeImage"])
-                    elif ship.get("image"):
-                        embed.set_image(url=ship["image"])
-                        
-                    manufacturer = ship.get("manufacturer", {}).get("name", "Unknown")
-                    embed.add_field(name="Manufacturer", value=manufacturer, inline=True)
-                    embed.add_field(name="Focus", value=ship.get("focus", "N/A"), inline=True)
-                    embed.add_field(name="Class", value=ship.get("classification", "N/A"), inline=True)
-                    
-                    # Stats
-                    stats = []
-                    if ship.get("price"): stats.append(f"Price: ${ship['price']}")
-                    if ship.get("maxCrew"): stats.append(f"Max Crew: {ship['maxCrew']}")
-                    if ship.get("cargo"): stats.append(f"Cargo: {ship['cargo']} SCU")
-                    if ship.get("scmSpeed"): stats.append(f"SCM Speed: {ship['scmSpeed']} m/s")
-                    if ship.get("afterburnerSpeed"): stats.append(f"Max Speed: {ship['afterburnerSpeed']} m/s")
-                    
-                    embed.add_field(name="Specifications", value="\n".join(stats) or "No stats available", inline=False)
-                    embed.add_field(name="Status", value=ship.get("productionStatus", "Unknown"), inline=True)
-                    
-                    await ctx.send(embed=embed)
-                    
-            except Exception as e:
-                await ctx.send(f"Failed to query FleetYards: {e}")
+                await msg.delete()
+            except:
+                pass
+        else:
+            selected_ship = matches[0]
+
+        if not selected_ship:
+             return await ctx.send("Error retrieving ship details.")
+
+        embed = discord.Embed(
+            title=f"{selected_ship.get('name', 'Unknown')} ({selected_ship.get('manufacturer', {}).get('code', 'UNK')})",
+            url=f"https://fleetyards.net/ships/{selected_ship.get('slug')}",
+            color=discord.Color.dark_red()
+        )
+        
+        if selected_ship.get("storeImage"):
+            embed.set_image(url=selected_ship["storeImage"])
+        elif selected_ship.get("image"):
+            embed.set_image(url=selected_ship["image"])
+            
+        manufacturer = selected_ship.get("manufacturer", {}).get("name", "Unknown")
+        embed.add_field(name="Manufacturer", value=manufacturer, inline=True)
+        embed.add_field(name="Focus", value=selected_ship.get("focus", "N/A"), inline=True)
+        embed.add_field(name="Class", value=selected_ship.get("classification", "N/A"), inline=True)
+        
+        stats = []
+        if selected_ship.get("price"): stats.append(f"Price: ${selected_ship['price']}")
+        if selected_ship.get("maxCrew"): stats.append(f"Max Crew: {selected_ship['maxCrew']}")
+        if selected_ship.get("cargo"): stats.append(f"Cargo: {selected_ship['cargo']} SCU")
+        if selected_ship.get("scmSpeed"): stats.append(f"SCM Speed: {selected_ship['scmSpeed']} m/s")
+        if selected_ship.get("afterburnerSpeed"): stats.append(f"Max Speed: {selected_ship['afterburnerSpeed']} m/s")
+        
+        embed.add_field(name="Specifications", value="\n".join(stats) or "No stats available", inline=False)
+        embed.add_field(name="Status", value=selected_ship.get("productionStatus", "Unknown"), inline=True)
+        
+        await ctx.send(embed=embed)
 
     @sc_base.command(name="org")
     async def sc_org(self, ctx, symbol: str):
@@ -354,45 +451,62 @@ class SCDroid(commands.Cog):
     @sc_base.command(name="addship")
     async def sc_addship(self, ctx, *, ship_name: str):
         """Add a ship to your personal fleet by searching FleetYards."""
-        # Search FleetYards first to get standardized data
-        url = "https://api.fleetyards.net/v1/models"
-        params = {"name": ship_name}
+        if not self.ship_cache:
+            await ctx.send("Ship cache is still building... please wait a moment.")
+            await self.update_ship_cache()
+            
+        params = ship_name.lower().split()
+        matches = []
         
-        async with ctx.typing():
+        # Simple fuzzy search
+        for ship in self.ship_cache:
+            name = (ship.get("name") or "").lower()
+            if all(word in name for word in params) or ship_name.lower() == name:
+                matches.append(ship)
+        
+        if not matches:
+            return await ctx.send(f"No ships found matching '{ship_name}'.")
+
+        # Sort matches
+        matches.sort(key=lambda x: (x.get("name", "").lower() != ship_name.lower(), len(x.get("name", ""))))
+        
+        selected_ship = None
+        
+        if len(matches) > 1:
+            view = ShipSelectView(matches, ctx.author)
+            msg = await ctx.send("Multiple ships found. Please select one:", view=view)
+            
+            if await view.wait():
+                return await ctx.send("Selection timed out.")
+                
+            selected_slug = view.selected_ship
+            selected_ship = next((s for s in self.ship_cache if s.get("slug") == selected_slug or s.get("name") == selected_slug), None)
             try:
-                async with self.session.get(url, params=params) as response:
-                    if response.status != 200:
-                        return await ctx.send("Could not verify ship with FleetYards.")
-                        
-                    data = await response.json()
-                    if not data:
-                        return await ctx.send(f"No ships found matching '{ship_name}'.")
-                    
-                    found_ship = data[0] if isinstance(data, list) else data
-                    
-                    # Construct the ship object to match the schema used by importfleet
-                    new_ship = {
-                        "name": found_ship.get("name"),
-                        "manufacturerName": found_ship.get("manufacturer", {}).get("name", "Unknown"),
-                        "manufacturerCode": found_ship.get("manufacturer", {}).get("code", "UNK"),
-                        "slug": found_ship.get("slug"),
-                        "shipName": None
-                    }
-                    
-                    fleet = await self.config.user(ctx.author).fleet()
-                    if fleet is None:
-                        fleet = []
-                    
-                    # Check for duplicates (optional, but good practice)
-                    # We'll allow duplicates if they want multiple of same ship, 
-                    # but maybe warn? For now, just add.
-                    fleet.append(new_ship)
-                    
-                    await self.config.user(ctx.author).fleet.set(fleet)
-                    await ctx.send(f"Added **{new_ship['name']}** to your fleet.")
-                    
-            except Exception as e:
-                await ctx.send(f"Error adding ship: {e}")
+                await msg.delete()
+            except:
+                pass
+        else:
+            selected_ship = matches[0]
+
+        if not selected_ship:
+             return await ctx.send("Cancelled.")
+        
+        new_ship = {
+            "name": selected_ship.get("name"),
+            "manufacturerName": selected_ship.get("manufacturer", {}).get("name", "Unknown"),
+            "manufacturerCode": selected_ship.get("manufacturer", {}).get("code", "UNK"),
+            "slug": selected_ship.get("slug"),
+            "shipName": None
+        }
+        
+        fleet = await self.config.user(ctx.author).fleet()
+        if fleet is None:
+            fleet = []
+        
+        fleet.append(new_ship)
+        
+        await self.config.user(ctx.author).fleet.set(fleet)
+        await ctx.send(f"Added **{new_ship['name']}** to your fleet.")
 
     @sc_base.command(name="removeship")
     async def sc_removeship(self, ctx, *, ship_name: str):
@@ -500,6 +614,14 @@ class SCDroid(commands.Cog):
             except Exception as e:
                 await ctx.send(f"Error fetching news: {e}")
 
+    @sc_base.command(name="reloadships")
+    @commands.is_owner()
+    async def sc_reloadships(self, ctx):
+        """Force a manual refresh of the ship database from FleetYards."""
+        await ctx.send("Manually refreshing ship database...")
+        await self.update_ship_cache()
+        await ctx.send(f"Done. Cache now contains {len(self.ship_cache)} ships.")
+
     @sc_base.command(name="track")
     @commands.has_permissions(manage_channels=True)
     async def sc_track(self, ctx, channel: discord.TextChannel = None):
@@ -518,7 +640,7 @@ class SCDroid(commands.Cog):
         
         try:
             async with self.session.get(feed_url) as response:
-                if response.status!= 200:
+                if response.status != 200:
                     return
                 
                 xml_data = await response.text()
@@ -531,32 +653,167 @@ class SCDroid(commands.Cog):
                 latest_entry = root.find('atom:entry', ns)
                 if latest_entry is None:
                     return
-                    
+                
+                # Extract relevant fields
                 entry_id = latest_entry.find('atom:id', ns).text
                 title = latest_entry.find('atom:title', ns).text
                 link = latest_entry.find('atom:link', ns).attrib['href']
                 
+                # Get last known state
                 last_known_id = await self.config.last_comm_link_id()
                 
                 # Delta Check: Broadcast if the ID does not match our known cache
-                if entry_id!= last_known_id:
+                if entry_id != last_known_id:
                     await self.config.last_comm_link_id.set(entry_id)
                     
                     embed = discord.Embed(
                         title="New RSI Comm-Link",
-                        description=f"**{title}**\n({link})",
+                        description=f"**[{title}]({link})**",
                         color=discord.Color.gold()
                     )
                     
-                    # Iterate over guilds and dispatch
-                    all_guilds = await self.config.all_guilds()
-                    for guild_id, data in all_guilds.items():
-                        channel_id = data.get("tracked_channel")
-                        if channel_id:
-                            guild = self.bot.get_guild(guild_id)
-                            if guild:
-                                channel = guild.get_channel(channel_id)
-                                if channel:
-                                    await channel.send(embed=embed)
+                    # Dispatch using helper
+                    await self.dispatch_to_tracked_channels(embed)
+                    
         except Exception as e:
             self.bot.logger.error(f"RSI Scraper Loop Exception: {e}")
+
+    @tasks.loop(minutes=60.0) # Check roadmap less frequently
+    async def roadmap_scraper_loop(self):
+        """Periodic check for Roadmap updates."""
+        await self.bot.wait_until_ready()
+        
+        # This endpoint returns the last updated date for the roadmap
+        # Note: RSI might change this endpoint structure. 
+        # API v1 board 1 is generally the Progress Tracker board.
+        url = "https://robertsspaceindustries.com/api/roadmap/v1/boards/1"
+        
+        try:
+            async with self.session.get(url) as response:
+                if response.status != 200:
+                    return
+            
+                data = await response.json()
+                if not data or not data.get("success") == 1:
+                    return
+                
+                # The 'modified' field contains the timestamp of the last edit
+                # data structure: { success: 1, data: { modified: "YYYY-MM-DD HH:MM:SS", ... } }
+                board_data = data.get("data")
+                if not board_data:
+                    return
+
+                last_modified = board_data.get("modified")
+                
+                last_known_mod = await self.config.last_roadmap_update()
+                
+                # Only announce if we have a previous value to compare to (avoid spam on first run)
+                # Or set it if it's new
+                if not last_known_mod:
+                     await self.config.last_roadmap_update.set(last_modified)
+                elif last_modified and last_modified != last_known_mod:
+                    await self.config.last_roadmap_update.set(last_modified)
+                    
+                    embed = discord.Embed(
+                        title="Star Citizen Roadmap Updated",
+                        description="The Progress Tracker has been updated!\n\n[View Roadmap](https://robertsspaceindustries.com/roadmap/progress-tracker)",
+                        color=discord.Color.blue()
+                    )
+                    # Using a generic roadmap image or trying to parse one would be good here
+                    # embed.set_image(url="...") 
+                    embed.set_footer(text=f"Updated: {last_modified}")
+                    
+                    await self.dispatch_to_tracked_channels(embed)
+                    
+        except Exception as e:
+            self.bot.logger.error(f"Roadmap Scraper Loop Exception: {e}")
+
+    async def dispatch_to_tracked_channels(self, embed):
+        """Helper to send updates to all tracked channels."""
+        all_guilds = await self.config.all_guilds()
+        for guild_id, data in all_guilds.items():
+            channel_id = data.get("tracked_channel")
+            if channel_id:
+                guild = self.bot.get_guild(guild_id)
+                if guild:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        try:
+                            await channel.send(embed=embed)
+                        except discord.Forbidden:
+                            pass # Bot lost permissions
+
+    @sc_base.command(name="compare")
+    async def sc_compare(self, ctx, *, query: str):
+        """Compare two ships side-by-side. Usage: `[p]sc compare <ship1> vs <ship2>`"""
+        if " vs " not in query.lower():
+             return await ctx.send("Please separate ship names with ' vs '. Example: `[p]sc compare titan vs cutlass`")
+        
+        ship1_query, ship2_query = query.split(" vs " if " vs " in query else " VS ", 1)
+        
+        # Helper to find a ship
+        async def find_ship(query):
+            params = query.lower().split()
+            matches = []
+            for ship in self.ship_cache:
+                name = (ship.get("name") or "").lower()
+                if all(word in name for word in params) or query.lower() == name:
+                    matches.append(ship)
+                    
+            if not matches:
+                return None
+                
+            matches.sort(key=lambda x: (x.get("name", "").lower() != query.lower(), len(x.get("name", ""))))
+            return matches[0] # Return best match for simplicity in this command
+            
+        ship1 = await find_ship(ship1_query)
+        ship2 = await find_ship(ship2_query)
+        
+        if not ship1:
+            return await ctx.send(f"Could not find ship: {ship1_query}")
+        if not ship2:
+            return await ctx.send(f"Could not find ship: {ship2_query}")
+            
+        # Build Comparison Embed
+        embed = discord.Embed(
+            title=f"Compare: {ship1['name']} vs {ship2['name']}",
+            color=discord.Color.magenta()
+        )
+        
+        # Format: Field Name | Ship 1 Value | Ship 2 Value
+        # Using a helper for cleaner formatting
+        def compare_val(field, label, suffix=""):
+            v1 = ship1.get(field, "N/A")
+            v2 = ship2.get(field, "N/A")
+            
+            # Add arrows for numeric comparisons
+            try:
+                # Basic sanitation for numbers (stripping $, commas)
+                n1 = float(str(v1).replace('$', '').replace(',', ''))
+                n2 = float(str(v2).replace('$', '').replace(',', ''))
+                
+                if n1 > n2:
+                    v1 = f"**{v1}** 🔼"
+                elif n2 > n1:
+                    v2 = f"**{v2}** 🔼"
+            except:
+                pass # Not numbers, ignore
+                
+            embed.add_field(name=f"{label} (1)", value=f"{v1}{suffix}", inline=True)
+            embed.add_field(name=f"{label} (2)", value=f"{v2}{suffix}", inline=True)
+            embed.add_field(name="\u200b", value="\u200b", inline=True) # Spacer
+            
+        embed.set_thumbnail(url=ship1.get("storeImage") or ship1.get("image") or "")
+        
+        embed.add_field(name="Ship 1", value=ship1['name'], inline=True)
+        embed.add_field(name="Ship 2", value=ship2['name'], inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        compare_val("price", "Price")
+        compare_val("scmSpeed", "SCM Speed", " m/s")
+        compare_val("maxCrew", "Max Crew")
+        compare_val("cargo", "Cargo", " SCU")
+        compare_val("length", "Length", " m")
+        compare_val("mass", "Mass", " kg")
+        
+        await ctx.send(embed=embed)
