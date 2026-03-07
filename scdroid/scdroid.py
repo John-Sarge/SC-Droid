@@ -404,17 +404,24 @@ class SCDroid(commands.Cog):
         manufacturer = selected_ship.get("manufacturer", {}).get("name", "Unknown")
         embed.add_field(name="Manufacturer", value=manufacturer, inline=True)
         embed.add_field(name="Focus", value=selected_ship.get("focus", "N/A"), inline=True)
-        embed.add_field(name="Class", value=selected_ship.get("classification", "N/A"), inline=True)
+        embed.add_field(name="Class", value=selected_ship.get("classification", "N/A").title(), inline=True)
         
         stats = []
-        if selected_ship.get("price"): stats.append(f"Price: ${selected_ship['price']}")
+        if selected_ship.get("price"): 
+            price = selected_ship['price']
+            try:
+                price = float(price)
+                stats.append(f"Price: {price:,.0f} UEC")
+            except:
+                stats.append(f"Price: {price} UEC")
+                
         if selected_ship.get("maxCrew"): stats.append(f"Max Crew: {selected_ship['maxCrew']}")
         if selected_ship.get("cargo"): stats.append(f"Cargo: {selected_ship['cargo']} SCU")
         if selected_ship.get("scmSpeed"): stats.append(f"SCM Speed: {selected_ship['scmSpeed']} m/s")
         if selected_ship.get("afterburnerSpeed"): stats.append(f"Max Speed: {selected_ship['afterburnerSpeed']} m/s")
         
         embed.add_field(name="Specifications", value="\n".join(stats) or "No stats available", inline=False)
-        embed.add_field(name="Status", value=selected_ship.get("productionStatus", "Unknown"), inline=True)
+        embed.add_field(name="Status", value=selected_ship.get("productionStatus", "Unknown").title(), inline=True)
         
         await ctx.send(embed=embed)
 
