@@ -43,6 +43,18 @@ class FleetPaginationView(discord.ui.View):
         self.children[0].disabled = (self.current_page == 0)
         self.children[1].disabled = (self.current_page == len(self.pages) - 1)
 
+    async def on_timeout(self):
+        # When the view times out (default 60s), remove the message to reduce clutter
+        try:
+            # We need the message object to delete it. 
+            # In discord.py, if the view was sent with a message, we can't always access it directly 
+            # unless we stored it. 
+            # However, since we are using this in a command, best practice is to store the message context.
+            if hasattr(self, 'message') and self.message:
+                await self.message.delete()
+        except:
+            pass # Message might already be deleted
+
 class ShipSelectView(discord.ui.View):
     # View containing a dropdown menu for selecting a specific ship from multiple search results
     def __init__(self, ships, author, timeout=60):
@@ -283,8 +295,9 @@ class SCDroid(commands.Cog):
             pages.append(embed)
 
         if len(pages) > 0:
-            view = FleetPaginationView(pages, ctx.author)
-            await ctx.send(embed=pages[0], view=view)
+            view = FleetPaginationView(pages, ctx.author, timeout=60) # 60 seconds timeout
+            msg = await ctx.send(embed=pages[0], view=view)
+            view.message = msg # Store message so on_timeout can delete it
         else:
              await ctx.send("No ships found.")
     
