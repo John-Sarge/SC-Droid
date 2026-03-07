@@ -876,16 +876,7 @@ class SCDroid(commands.Cog):
             embed.add_field(name=f"{label} (2)", value=f"{val2_str}{suffix}", inline=True)
             embed.add_field(name="\u200b", value="\u200b", inline=True) 
             
-        # Images
-        # Ship 1 as Thumbnail
-        img1 = ship1.get("storeImage") or ship1.get("image")
-        if img1:
-            embed.set_thumbnail(url=img1)
-            
-        # Ship 2 as Main Image
-        img2 = ship2.get("storeImage") or ship2.get("image")
-        if img2:
-            embed.set_image(url=img2)
+        # Images removed per request since they cannot be symmetrical in a standard Embed
         
         embed.add_field(name="Ship 1", value=ship1['name'], inline=True)
         embed.add_field(name="Ship 2", value=ship2['name'], inline=True)
